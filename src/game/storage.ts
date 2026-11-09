@@ -4,6 +4,7 @@ const KEY = 'chef-conveyor-save-v1'
 
 const DEFAULT: SaveData = {
   sound: true,
+  music: true,
   bestWave: 0,
   wins: 0,
   runs: 0,

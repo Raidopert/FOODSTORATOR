@@ -74,6 +74,21 @@ export interface FloatText {
   size: number
 }
 
+export type ParticleKind = 'steam' | 'spark' | 'star' | 'smoke' | 'puff'
+
+export interface Particle {
+  id: number
+  kind: ParticleKind
+  x: number
+  y: number
+  vx: number
+  vy: number
+  life: number
+  maxLife: number
+  size: number
+  color: string
+}
+
 export interface DraftCard {
   id: string
   emoji: string
@@ -113,6 +128,7 @@ export interface HudState {
 
 export interface SaveData {
   sound: boolean
+  music: boolean
   bestWave: number
   wins: number
   runs: number

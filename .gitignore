@@ -65,3 +65,5 @@ Caddyfile
 /scripts/debug-wave1.ts
 *.pid
 *.out.log
+# tool artifacts
+/tool-results/

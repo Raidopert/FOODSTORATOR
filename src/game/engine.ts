@@ -7,7 +7,7 @@ import {
   upgradeCost, sellValue,
 } from './config'
 import type {
-  Phase, Dish, Station, FloatText, DraftCard, RunStats, HudState, StepType, StationType,
+  Phase, Dish, Station, FloatText, DraftCard, RunStats, HudState, StepType, StationType, Particle, ParticleKind,
 } from './types'
 
 const STEP_TYPES: StepType[] = ['chop', 'fry', 'season', 'plate']
@@ -29,6 +29,7 @@ export class GameEngine {
   stations: Station[] = []
   pending: PendingSpawn[] = []
   floats: FloatText[] = []
+  particles: Particle[] = []
 
   draft: DraftCard[] = []
   draftPicked = false
@@ -68,6 +69,7 @@ export class GameEngine {
     this.stations = []
     this.pending = []
     this.floats = []
+    this.particles = []
     this.draft = []
     this.draftPicked = false
     this.placing = null
@@ -128,9 +130,17 @@ export class GameEngine {
       }
     }
 
-    // плавающие тексты живут всегда
+    // плавающие тексты и частицы живут всегда (визуальный слой)
     for (const f of this.floats) f.life -= dtReal
     this.floats = this.floats.filter((f) => f.life > 0)
+
+    for (const p of this.particles) {
+      p.life -= dtReal
+      p.x += p.vx * dtReal
+      p.y += p.vy * dtReal
+      if (p.kind === 'spark' || p.kind === 'star') p.vy += 240 * dtReal
+    }
+    this.particles = this.particles.filter((p) => p.life > 0)
 
     this.touchHud(false)
   }
@@ -157,6 +167,10 @@ export class GameEngine {
   private moveDishes(dt: number) {
     for (const d of this.dishes) {
       const pos = pointAt(d.dist)
+      // дым от сгоревшего блюда тянется за ним
+      if (d.spoiled && Math.random() < dt * 5) {
+        this.puffAt(pos.x, pos.y - 16, 'smoke', 1, 10, 26, 6, '#57534e', 0.9)
+      }
       let slow = 1
       for (const st of this.stations) {
         if (st.type !== 'freeze') continue
@@ -214,15 +228,22 @@ export class GameEngine {
         target.prog[type]++
         st.flash = 0.22
         st.cd = this.cdOf(st)
+        // искры и парок над блюдом при выполнении шага
+        const tp = pointAt(target.dist)
+        this.puffAt(tp.x, tp.y - 10, 'spark', 3, 70, 50, 2.6, '#fbbf24', 0.45)
+        this.puffAt(tp.x, tp.y - 16, 'steam', 1, 14, 34, 7, '#eee9e2', 0.85)
       } else if (burnTarget) {
         burnTarget.heat++
         st.flash = 0.3
         st.cd = this.cdOf(st)
+        const bp = pointAt(burnTarget.dist)
         if (burnTarget.heat >= BURN_LIMIT) {
           burnTarget.spoiled = true
-          const pos = pointAt(burnTarget.dist)
-          this.addFloat('🔥 сгорело!', pos.x, pos.y - 34, '#ef4444', 15)
+          this.puffAt(bp.x, bp.y - 14, 'smoke', 7, 46, 40, 7, '#57534e', 1.1)
+          this.addFloat('🔥 сгорело!', bp.x, bp.y - 34, '#ef4444', 15)
           this.sfx('burn')
+        } else {
+          this.puffAt(bp.x, bp.y - 16, 'steam', 1, 12, 30, 6, '#e7e5e4', 0.7)
         }
       } else {
         st.cd = 0
@@ -238,6 +259,7 @@ export class GameEngine {
       this.rep = Math.max(0, this.rep - REP_SPOIL)
       this.stats.spoiled++
       this.addFloat(`−${REP_SPOIL}⭐ ${r.emoji}`, pos.x, pos.y - 30, '#ef4444', 16)
+      this.puffAt(pos.x, pos.y - 14, 'smoke', 5, 40, 36, 6, '#57534e', 1.0)
       this.sfx('fail')
     } else {
       const missing = r.steps.filter((s) => d.prog[s.type] < s.count)
@@ -248,11 +270,13 @@ export class GameEngine {
         this.stats.perfect++
         this.stats.tips += money
         this.addFloat(`+${money}₽ идеально!`, pos.x, pos.y - 30, '#22c55e', 16)
+        this.puffAt(pos.x, pos.y - 22, 'star', 7, 90, 80, 15, '#fbbf24', 0.85)
         this.sfx('coin')
       } else {
         this.rep = Math.max(0, this.rep - REP_FAIL)
         this.stats.failed++
         this.addFloat(`−${REP_FAIL}⭐ ${r.emoji}`, pos.x, pos.y - 30, '#f97316', 15)
+        this.puffAt(pos.x, pos.y - 16, 'puff', 4, 55, 34, 8, '#fb923c', 0.7)
         this.sfx('fail')
       }
     }
@@ -455,6 +479,27 @@ export class GameEngine {
   setPaused(v: boolean) {
     this.paused = v
     this.touchHud(true)
+  }
+
+/** Рождение частиц-эффектов (визуальный слой) */
+  private puffAt(x: number, y: number, kind: ParticleKind, count: number, spread: number, up: number, size: number, color: string, life: number) {
+    for (let i = 0; i < count; i++) {
+      if (this.particles.length > 240) return
+      const a = Math.random() * Math.PI * 2
+      const v = spread * (0.4 + Math.random() * 0.6)
+      this.particles.push({
+        id: this.nextId++,
+        kind,
+        x: x + (Math.random() - 0.5) * 10,
+        y: y + (Math.random() - 0.5) * 6,
+        vx: Math.cos(a) * v,
+        vy: Math.sin(a) * v * 0.6 - up,
+        life,
+        maxLife: life,
+        size: size * (0.8 + Math.random() * 0.4),
+        color,
+      })
+    }
   }
 
   addFloat(text: string, x: number, y: number, color: string, size: number) {

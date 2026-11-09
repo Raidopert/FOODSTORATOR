@@ -2,9 +2,29 @@ type Names =
   | 'click' | 'place' | 'upgrade' | 'sell' | 'coin' | 'fail' | 'burn'
   | 'wave' | 'draft' | 'win' | 'lose' | 'error'
 
+const TEMPO_STEP = 0.26 // сек на шаг (16-е, ~115 BPM)
+
+/** Аккордовая сетка: C — Am — F — G (I–vi–IV–V) */
+const CHORDS: { bass: number; triad: [number, number, number] }[] = [
+  { bass: 65.41, triad: [261.63, 329.63, 392.0] },   // C
+  { bass: 55.0,  triad: [220.0, 261.63, 329.63] },   // Am
+  { bass: 87.31, triad: [174.61, 220.0, 261.63] },   // F
+  { bass: 98.0,  triad: [196.0, 246.94, 293.66] },   // G
+]
+
+/** Нежные «блестки» мелодии на пентатонике */
+const SPARKLE = [329.63, 392.0, 440.0, 523.25, 587.33] // E4 G4 A4 C5 D5
+
 export class Sfx {
   private ctx: AudioContext | null = null
   enabled = true
+  musicOn = false
+
+  private musicTimer: ReturnType<typeof setInterval> | null = null
+  private nextNote = 0
+  private stepIdx = 0
+  private musicGain: GainNode | null = null
+  private noiseBuf: AudioBuffer | null = null
 
   private ensure(): AudioContext | null {
     if (typeof window === 'undefined') return null
@@ -12,6 +32,9 @@ export class Sfx {
       const AC = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
       if (!AC) return null
       this.ctx = new AC()
+      this.musicGain = this.ctx.createGain()
+      this.musicGain.gain.value = 0.9
+      this.musicGain.connect(this.ctx.destination)
     }
     if (this.ctx.state === 'suspended') void this.ctx.resume()
     return this.ctx
@@ -31,6 +54,103 @@ export class Sfx {
     osc.connect(gain).connect(ctx.destination)
     osc.start(start)
     osc.stop(start + dur + 0.02)
+  }
+
+  /** Мягкий тон для музыки — через отдельный шину громкости */
+  private mTone(freq: number, when: number, dur: number, vol: number, type: OscillatorType = 'sine') {
+    const ctx = this.ctx
+    if (!ctx || !this.musicGain) return
+    const osc = ctx.createOscillator()
+    const gain = ctx.createGain()
+    osc.type = type
+    osc.frequency.value = freq
+    gain.gain.setValueAtTime(0, when)
+    gain.gain.linearRampToValueAtTime(vol, when + 0.02)
+    gain.gain.exponentialRampToValueAtTime(0.0001, when + dur)
+    osc.connect(gain).connect(this.musicGain)
+    osc.start(when)
+    osc.stop(when + dur + 0.03)
+  }
+
+  /** Шумовой «хэт» через highpass */
+  private mHat(when: number, vol: number) {
+    const ctx = this.ctx
+    if (!ctx || !this.musicGain || !this.noiseBuf) return
+    const src = ctx.createBufferSource()
+    src.buffer = this.noiseBuf
+    const hp = ctx.createBiquadFilter()
+    hp.type = 'highpass'
+    hp.frequency.value = 7000
+    const gain = ctx.createGain()
+    gain.gain.setValueAtTime(vol, when)
+    gain.gain.exponentialRampToValueAtTime(0.0001, when + 0.05)
+    src.connect(hp).connect(gain).connect(this.musicGain)
+    src.start(when)
+    src.stop(when + 0.06)
+  }
+
+  // ---------- Фоновая музыка ----------
+  setMusic(on: boolean) {
+    this.musicOn = on
+    if (on) this.startMusic()
+    else this.stopMusic()
+  }
+
+  private startMusic() {
+    const ctx = this.ensure()
+    if (!ctx || this.musicTimer) return
+    if (!this.noiseBuf) {
+      const len = Math.floor(ctx.sampleRate * 0.4)
+      const buf = ctx.createBuffer(1, len, ctx.sampleRate)
+      const data = buf.getChannelData(0)
+      for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1
+      this.noiseBuf = buf
+    }
+    this.nextNote = ctx.currentTime + 0.08
+    this.musicTimer = setInterval(() => this.scheduleMusic(), 90)
+    this.scheduleMusic()
+  }
+
+  private stopMusic() {
+    if (this.musicTimer) {
+      clearInterval(this.musicTimer)
+      this.musicTimer = null
+    }
+  }
+
+  private scheduleMusic() {
+    const ctx = this.ctx
+    if (!ctx || !this.musicOn) return
+    while (this.nextNote < ctx.currentTime + 0.4) {
+      this.playMusicStep(this.stepIdx, this.nextNote)
+      this.stepIdx = (this.stepIdx + 1) % 64
+      this.nextNote += TEMPO_STEP
+    }
+  }
+
+  private playMusicStep(i: number, when: number) {
+    const bar = Math.floor(i / 16)
+    const pos = i % 16
+    const chord = CHORDS[bar]
+
+    // бас: на сильную и слабую долю
+    if (pos === 0) this.mTone(chord.bass, when, 0.42, 0.05, 'sine')
+    if (pos === 8) this.mTone(chord.bass * 1.5, when, 0.3, 0.04, 'sine')
+    if (pos === 11) this.mTone(chord.bass * 1.19, when, 0.18, 0.03, 'sine')
+
+    // аккордовые «щипки» на офф-битах
+    if (pos === 2 || pos === 6 || pos === 10 || pos === 14) {
+      chord.triad.forEach((f, k) => this.mTone(f, when, 0.2, 0.022 - k * 0.004, 'triangle'))
+    }
+
+    // хэт на каждый чётный шаг
+    if (pos % 2 === 0) this.mHat(when, pos % 4 === 0 ? 0.014 : 0.007)
+
+    // мелодические брызги
+    if (pos === 4 || pos === 12) {
+      const note = SPARKLE[(bar * 2 + (pos === 12 ? 1 : 0) + (i % 7 === 0 ? 2 : 0)) % SPARKLE.length]
+      this.mTone(note, when, 0.3, 0.026, 'sine')
+    }
   }
 
   play(name: Names) {

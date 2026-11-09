@@ -1,5 +1,5 @@
 // Service Worker: офлайн-кэш оболочки игры (PWA)
-const CACHE = 'chef-conveyor-v1'
+const CACHE = 'chef-conveyor-v2'
 const CORE = [
   '/',
   '/manifest.webmanifest',

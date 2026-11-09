@@ -6,12 +6,12 @@ import { renderGame } from '@/game/render'
 import { Sfx } from '@/game/audio'
 import { loadSave, persistSave } from '@/game/storage'
 import {
-  W, H, CELL, STATIONS, STATION_ORDER, WAVES,
+  W, H, CELL, STATIONS, STATION_ORDER, WAVES, RECIPES, STEP_INFO,
   upgradeCost, sellValue, LEVEL_NAME, LEVEL_COUNT, WAVE_SKIP_BONUS,
 } from '@/game/config'
-import type { HudState, SaveData } from '@/game/types'
+import type { HudState, SaveData, RecipeDef } from '@/game/types'
 
-const DEFAULT_SAVE: SaveData = { sound: true, bestWave: 0, wins: 0, runs: 0, bestTips: 0, seenHowTo: false }
+const DEFAULT_SAVE: SaveData = { sound: true, music: true, bestWave: 0, wins: 0, runs: 0, bestTips: 0, seenHowTo: false }
 
 const DEFAULT_HUD: HudState = {
   phase: 'menu',
@@ -33,6 +33,10 @@ const DEFAULT_HUD: HudState = {
   preBoost: false,
   lastWaveResult: null,
   nextWave: [],
+}
+
+function stepsStr(r: RecipeDef): string {
+  return r.steps.map((s) => STEP_INFO[s.type].emoji + (s.count > 1 ? `×${s.count}` : '')).join(' → ')
 }
 
 export default function GameShell() {
@@ -83,6 +87,12 @@ export default function GameShell() {
     }
     soundRef.current = loadSave().sound
     sfx.enabled = soundRef.current
+    // музыка стартует после первого клика (политика автоплея браузеров)
+    const startMusicOnce = () => {
+      if (loadSave().music) sfx.setMusic(true)
+      window.removeEventListener('pointerdown', startMusicOnce)
+    }
+    window.addEventListener('pointerdown', startMusicOnce)
     // отладочный хук для автотестов и балансировки
     ;(window as unknown as { __engine: GameEngine }).__engine = engine
   }, [])
@@ -237,6 +247,16 @@ export default function GameShell() {
     })
   }
 
+  const toggleMusic = () => {
+    const sfx = sfxRef.current as Sfx
+    setSave((s) => {
+      const next = { ...s, music: !s.music }
+      sfx.setMusic(next.music)
+      persistSave(next)
+      return next
+    })
+  }
+
   // ---------- Выбранная станция (данные из HUD-снапшота) ----------
   const selected = hud.selectedStation
 
@@ -306,6 +326,13 @@ export default function GameShell() {
                 className="h-8 w-8 rounded-lg bg-stone-900/85 text-sm text-white shadow transition hover:bg-stone-800 active:scale-95 sm:h-9 sm:w-9"
               >
                 {save.sound ? '🔊' : '🔇'}
+              </button>
+              <button
+                aria-label="Музыка"
+                onClick={toggleMusic}
+                className="h-8 w-8 rounded-lg bg-stone-900/85 text-sm text-white shadow transition hover:bg-stone-800 active:scale-95 sm:h-9 sm:w-9"
+              >
+                <span className={save.music ? '' : 'opacity-40'}>🎵</span>
               </button>
               <button
                 aria-label="Как играть"
@@ -467,6 +494,12 @@ export default function GameShell() {
                 🔄 Заново
               </button>
               <button
+                onClick={() => setShowHowTo(true)}
+                className="w-52 rounded-xl bg-sky-700 px-4 py-2.5 font-bold text-white shadow-lg transition hover:bg-sky-600"
+              >
+                📖 Правила
+              </button>
+              <button
                 onClick={() => { E().setPaused(false); E().openMenu() }}
                 className="w-52 rounded-xl bg-stone-700 px-4 py-2.5 font-bold text-white shadow-lg transition hover:bg-stone-600"
               >
@@ -555,7 +588,7 @@ export default function GameShell() {
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-stone-950/85 p-2">
             <div className="max-h-full w-full max-w-lg overflow-y-auto rounded-2xl bg-stone-900/95 p-4 shadow-2xl sm:p-6">
               <div className="text-center">
-                <div className="text-4xl sm:text-5xl">🍳🚚🍽️</div>
+                <img src="/logo.svg" alt="FOODSTORATOR" className="mx-auto h-24 w-24 drop-shadow-lg sm:h-28 sm:w-28" />
                 <h1 className="mt-1 bg-gradient-to-r from-amber-300 via-orange-400 to-red-400 bg-clip-text text-3xl font-black tracking-tight text-transparent sm:text-4xl">
                   ШЕФ-КОНВЕЙЕР
                 </h1>
@@ -584,6 +617,12 @@ export default function GameShell() {
                   >
                     {save.sound ? '🔊' : '🔇'}
                   </button>
+                  <button
+                    onClick={toggleMusic}
+                    className="rounded-xl bg-stone-700 px-4 py-2.5 font-bold text-white shadow transition hover:bg-stone-600"
+                  >
+                    <span className={save.music ? '' : 'opacity-40'}>🎵</span>
+                  </button>
                 </div>
               </div>
 
@@ -605,32 +644,84 @@ export default function GameShell() {
               </div>
 
               <div className="mt-2 text-center text-[10px] text-stone-600">
-                Прототип ядра v0.1 · {LEVEL_NAME} · {LEVEL_COUNT} волн
+                FOODSTORATOR v0.2 · {LEVEL_NAME} · {LEVEL_COUNT} волн
               </div>
             </div>
           </div>
         )}
 
-        {/* ---------- КАК ИГРАТЬ ---------- */}
+        {/* ---------- ПРАВИЛА ---------- */}
         {showHowTo && (
           <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/75 p-2" onClick={() => setShowHowTo(false)}>
             <div
-              className="max-h-full w-full max-w-lg overflow-y-auto rounded-2xl bg-stone-900 p-4 shadow-2xl sm:p-5"
+              className="max-h-full w-full max-w-lg overflow-y-auto rounded-2xl bg-stone-900 p-3 shadow-2xl sm:p-5"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="mb-2 text-center text-xl font-black text-white sm:text-2xl">📖 Как играть</div>
-              <ul className="space-y-2 text-xs leading-relaxed text-stone-300 sm:text-sm">
-                <li>🚚 <b>Блюда-заказы</b> выезжают из склада и едут конвейером к стойке официанта.</li>
-                <li>🔪🍳🧂🍽️ <b>Станции</b> вдоль пути автоматически выполняют шаги рецепта: нарезка, жарка, специи, подача.</li>
-                <li>✅ Если все шаги выполнены — <b className="text-green-400">идеальная подача</b>: чаевые +25% и +2 репутации.</li>
-                <li>❌ Не хватает шагов — возврат блюда, <b className="text-orange-400">−12 репутации</b>.</li>
-                <li>🔥 Лишние жарки добавляют жар 🔥: <b className="text-red-400">3 лишние — блюдо сгорает</b> (−20 репутации). Не штампуй плиты кучей!</li>
-                <li>❄️ <b>Морозилка</b> замедляет конвейер — у поваров больше времени.</li>
-                <li>🃏 Между волнами — <b>draft</b>: выбор 1 из 3 карт-бустов.</li>
-                <li>👀 Перед волной видно <b>состав и шаги</b> блюд — строй станции под них: 🍟 требует 🍳🍳, гамбургер — 🔪🔪+🍳+🍽️.</li>
-                <li>⭐ Репутация на нуле — ресторан закрывается. Продержись все {LEVEL_COUNT} волн!</li>
-                <li>👆 <b>Управление:</b> кнопка станции внизу → клетка у конвейера. Тап по станции — улучшить/продать. Клавиши 1–5, Esc, пробел.</li>
-              </ul>
+              <div className="mb-2 text-center text-xl font-black text-white sm:text-2xl">📖 Правила кухни</div>
+
+              {/* Цель */}
+              <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs leading-snug text-amber-100 sm:text-sm">
+                <b className="text-amber-300">Цель:</b> подавай блюда, пока они едут по конвейеру. Репутация на нуле — ресторан закрыт. Продержись все {LEVEL_COUNT} волн и прими «БАНКЕТ»!
+              </div>
+
+              {/* Схема потока */}
+              <div className="mt-2 flex flex-wrap items-center justify-center gap-1 rounded-xl bg-stone-800/70 p-2 text-[11px] font-semibold text-white sm:text-sm">
+                <span className="rounded-lg bg-stone-900 px-2 py-1">📦 Склад</span>
+                <span className="text-stone-500">→</span>
+                <span className="rounded-lg bg-stone-900 px-2 py-1">🔪 готовка на станциях</span>
+                <span className="text-stone-500">→</span>
+                <span className="rounded-lg bg-stone-900 px-2 py-1">🧑‍🍳 Стойка</span>
+              </div>
+
+              {/* Станции */}
+              <div className="mt-3">
+                <div className="mb-1 text-[11px] font-bold uppercase tracking-wide text-stone-400 sm:text-xs">Станции-башни</div>
+                <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
+                  {STATION_ORDER.map((t) => {
+                    const d = STATIONS[t]
+                    return (
+                      <div key={t} className="flex items-center gap-2 rounded-lg bg-stone-800/70 px-2 py-1.5">
+                        <span className="text-lg">{d.emoji}</span>
+                        <div className="min-w-0">
+                          <div className="truncate text-xs font-bold text-white">
+                            {d.name} · <span className="text-amber-300">{d.cost}₽</span>
+                          </div>
+                          <div className="truncate text-[10px] leading-tight text-stone-400">{d.desc}</div>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+
+              {/* Рецепты */}
+              <div className="mt-3">
+                <div className="mb-1 text-[11px] font-bold uppercase tracking-wide text-stone-400 sm:text-xs">Рецепты: шаги цепочкой</div>
+                <div className="rounded-xl bg-stone-800/70 p-2">
+                  {Object.values(RECIPES).map((r) => (
+                    <div key={r.id} className="flex items-center justify-between gap-2 py-0.5 text-[11px] sm:text-xs">
+                      <span className="shrink-0 font-bold text-white">{r.emoji} {r.name}</span>
+                      <span className="truncate text-stone-300">{stepsStr(r)} <span className="font-bold text-amber-300">· {r.price}₽</span></span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Важно знать */}
+              <div className="mt-3 grid grid-cols-2 gap-1.5 text-[10px] leading-snug sm:grid-cols-3 sm:text-[11px]">
+                <div className="rounded-lg bg-green-500/15 p-2 text-green-200"><b className="text-green-400">✅ Идеал:</b> все шаги → чаевые ×1.25 и +2⭐</div>
+                <div className="rounded-lg bg-orange-500/15 p-2 text-orange-200"><b className="text-orange-400">❌ Провал:</b> шаги пропущены → −12⭐</div>
+                <div className="rounded-lg bg-red-500/15 p-2 text-red-200"><b className="text-red-400">🔥 Перегрев:</b> 3 лишних жарки — блюдо сгорело, −20⭐</div>
+                <div className="rounded-lg bg-sky-500/15 p-2 text-sky-200"><b className="text-sky-400">❄️ Морозилка:</b> тормозит конвейер — у поваров больше времени</div>
+                <div className="rounded-lg bg-violet-500/15 p-2 text-violet-200"><b className="text-violet-400">🃏 Draft:</b> после волны выбор 1 из 3 карт; пропуск +{WAVE_SKIP_BONUS}₽</div>
+                <div className="rounded-lg bg-stone-700/60 p-2 text-stone-200"><b className="text-white">👀 Разведка:</b> перед волной виден состав блюд — строй станции под них</div>
+              </div>
+
+              {/* Управление */}
+              <div className="mt-3 rounded-xl bg-stone-800/70 p-2.5 text-[11px] leading-snug text-stone-300 sm:text-xs">
+                <b className="text-white">Управление:</b> кнопка станции внизу → свободная клетка у конвейера. Тап по построенной — улучшить или продать. Клавиши: 1–5 станции, Space — пауза, Esc — отмена.
+              </div>
+
               <div className="mt-3 flex justify-center">
                 <button
                   onClick={() => setShowHowTo(false)}
