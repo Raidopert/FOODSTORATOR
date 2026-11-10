@@ -1,6 +1,6 @@
 type Names =
-  | 'click' | 'place' | 'upgrade' | 'sell' | 'coin' | 'fail' | 'burn'
-  | 'wave' | 'draft' | 'win' | 'lose' | 'error'
+  | 'click' | 'place' | 'upgrade' | 'sell' | 'coin' | 'splat' | 'zap' | 'flame'
+  | 'freeze' | 'chomp' | 'shoot' | 'shoot2' | 'wave' | 'boss' | 'win' | 'lose' | 'error'
 
 const TEMPO_STEP = 0.26 // сек на шаг (16-е, ~115 BPM)
 
@@ -153,6 +153,31 @@ export class Sfx {
     }
   }
 
+  /** Шумовой всплеск (шлёп, огонь) через lowpass */
+  private noise(t0: number, dur: number, vol: number, freq: number) {
+    const ctx = this.ctx
+    if (!ctx) return
+    if (!this.noiseBuf) {
+      const len = Math.floor(ctx.sampleRate * 0.4)
+      const buf = ctx.createBuffer(1, len, ctx.sampleRate)
+      const data = buf.getChannelData(0)
+      for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1
+      this.noiseBuf = buf
+    }
+    const src = ctx.createBufferSource()
+    src.buffer = this.noiseBuf
+    const lp = ctx.createBiquadFilter()
+    lp.type = 'lowpass'
+    lp.frequency.value = freq
+    const gain = ctx.createGain()
+    const start = ctx.currentTime + t0
+    gain.gain.setValueAtTime(vol, start)
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + dur)
+    src.connect(lp).connect(gain).connect(ctx.destination)
+    src.start(start)
+    src.stop(start + dur + 0.02)
+  }
+
   play(name: Names) {
     if (!this.enabled) return
     const ctx = this.ensure()
@@ -175,22 +200,41 @@ export class Sfx {
         this.tone(880, 0, 0.07, 0.1, 'sine')
         this.tone(1318, 0.07, 0.14, 0.1, 'sine')
         break
-      case 'fail':
-        this.tone(320, 0, 0.12, 0.1, 'sawtooth')
-        this.tone(220, 0.1, 0.16, 0.1, 'sawtooth')
+      case 'shoot':
+        this.tone(620, 0, 0.05, 0.05, 'square')
         break
-      case 'burn':
-        this.tone(140, 0, 0.22, 0.12, 'sawtooth')
-        this.tone(110, 0.08, 0.2, 0.1, 'square')
+      case 'shoot2':
+        this.tone(240, 0, 0.09, 0.07, 'sawtooth')
+        this.tone(180, 0.03, 0.06, 0.05, 'sawtooth')
+        break
+      case 'splat':
+        this.noise(0, 0.07, 0.09, 900)
+        break
+      case 'zap':
+        this.tone(1100, 0, 0.05, 0.05, 'sawtooth')
+        this.tone(700, 0.03, 0.07, 0.05, 'sawtooth')
+        break
+      case 'flame':
+        this.noise(0, 0.18, 0.05, 500)
+        break
+      case 'freeze':
+        this.tone(1400, 0, 0.06, 0.05, 'sine')
+        this.tone(1900, 0.04, 0.08, 0.04, 'sine')
+        break
+      case 'chomp':
+        this.tone(120, 0, 0.1, 0.16, 'square')
+        this.tone(90, 0.1, 0.14, 0.16, 'square')
+        this.tone(60, 0.2, 0.2, 0.14, 'sawtooth')
+        break
+      case 'boss':
+        this.tone(98, 0, 0.3, 0.12, 'sawtooth')
+        this.tone(98, 0.32, 0.3, 0.12, 'sawtooth')
+        this.tone(78, 0.64, 0.5, 0.12, 'sawtooth')
         break
       case 'wave':
         this.tone(523, 0, 0.1, 0.1, 'triangle')
         this.tone(659, 0.1, 0.1, 0.1, 'triangle')
         this.tone(784, 0.2, 0.16, 0.1, 'triangle')
-        break
-      case 'draft':
-        this.tone(659, 0, 0.09, 0.09, 'sine')
-        this.tone(523, 0.09, 0.12, 0.09, 'sine')
         break
       case 'win':
         this.tone(523, 0, 0.12, 0.12, 'triangle')

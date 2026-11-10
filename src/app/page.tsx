@@ -7,8 +7,8 @@ const GameShell = dynamic(() => import('@/components/game/GameShell'), {
   loading: () => (
     <div className="flex min-h-screen items-center justify-center bg-stone-950">
       <div className="flex flex-col items-center gap-3">
-        <div className="text-5xl">🍳</div>
-        <div className="text-sm font-semibold text-amber-300">Шеф-Конвейер загружается…</div>
+        <div className="text-5xl">🥦</div>
+        <div className="text-sm font-semibold text-green-300">FOODSTORATOR TD загружается…</div>
       </div>
     </div>
   ),

@@ -2,15 +2,15 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Шеф-Конвейер — кухонный тауэр-дефенс",
+  title: "FOODSTORATOR TD — вредная еда против здоровой кухни",
   description:
-    "Гибрид тауэр-дефенса и автобатлера на кухне: блюда едут конвейером от склада к официанту, а ты готовишь их станциями-поварами. Устанавливается на телефон, планшет и ПК.",
-  applicationName: "Шеф-Конвейер",
+    "Классический tower defense: сахар, чипсы и фри едут по дороге к огромному открытому рту, а башни из здоровой еды стреляют по ним. Ставь брокколи-пушки, морковных снайперов и чили-огнемёты, защищай зубы! Устанавливается на телефон, планшет и ПК.",
+  applicationName: "FOODSTORATOR TD",
   manifest: "/manifest.webmanifest",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "Шеф-Конвейер",
+    title: "FOODSTORATOR TD",
   },
   icons: {
     icon: [

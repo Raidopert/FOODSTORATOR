@@ -12,39 +12,51 @@ const svg = (pad = 0) => `
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#fb923c"/>
-      <stop offset="1" stop-color="#dc2626"/>
+      <stop offset="0" stop-color="#16a34a"/>
+      <stop offset="1" stop-color="#14532d"/>
+    </linearGradient>
+    <linearGradient id="candy" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f9a8d4"/>
+      <stop offset="1" stop-color="#ec4899"/>
     </linearGradient>
   </defs>
   <clipPath id="rc"><rect x="${pad}" y="${pad}" width="${512 - pad * 2}" height="${512 - pad * 2}" rx="${pad ? 0 : 96}"/></clipPath>
   <g clip-path="url(#rc)">
     <rect x="${pad}" y="${pad}" width="${512 - pad * 2}" height="${512 - pad * 2}" fill="url(#bg)"/>
-    <!-- колпак повара -->
-    <g transform="translate(256 128)">
-      <path d="M -78 44 C -130 44 -134 -34 -84 -40 C -80 -92 80 -92 84 -40 C 134 -34 130 44 78 44 L 78 84 L -78 84 Z"
-            fill="#fff7ed" stroke="#7c2d12" stroke-width="10" stroke-linejoin="round"/>
-      <line x1="-78" y1="52" x2="78" y2="52" stroke="#7c2d12" stroke-width="10" stroke-linecap="round"/>
-      <line x1="-44" y1="-6" x2="-44" y2="32" stroke="#fdba74" stroke-width="9" stroke-linecap="round"/>
-      <line x1="0" y1="-6" x2="0" y2="32" stroke="#fdba74" stroke-width="9" stroke-linecap="round"/>
-      <line x1="44" y1="-6" x2="44" y2="32" stroke="#fdba74" stroke-width="9" stroke-linecap="round"/>
+    <!-- огромный рот -->
+    <g transform="translate(256 300)">
+      <ellipse cx="0" cy="0" rx="150" ry="130" fill="#e11d48" stroke="#881337" stroke-width="14"/>
+      <ellipse cx="0" cy="6" rx="96" ry="100" fill="#5b1113"/>
+      <!-- зубы верхние -->
+      <g fill="#ffffff" stroke="#cbd5e1" stroke-width="5">
+        <rect x="-78" y="-84" width="34" height="42" rx="12"/>
+        <rect x="-38" y="-92" width="34" height="46" rx="12"/>
+        <rect x="2" y="-92" width="34" height="46" rx="12"/>
+        <rect x="42" y="-84" width="34" height="42" rx="12"/>
+      </g>
+      <!-- язык -->
+      <ellipse cx="0" cy="62" rx="70" ry="38" fill="#fb7185"/>
+      <!-- глаза -->
+      <circle cx="-62" cy="-164" r="26" fill="#ffffff" stroke="#1c1917" stroke-width="8"/>
+      <circle cx="62" cy="-164" r="26" fill="#ffffff" stroke="#1c1917" stroke-width="8"/>
+      <circle cx="-56" cy="-158" r="11" fill="#1c1917"/>
+      <circle cx="68" cy="-158" r="11" fill="#1c1917"/>
+      <path d="M -88 -196 L -40 -184" stroke="#1c1917" stroke-width="10" stroke-linecap="round"/>
+      <path d="M 88 -196 L 40 -184" stroke="#1c1917" stroke-width="10" stroke-linecap="round"/>
     </g>
-    <!-- тарелка с бургером -->
-    <g>
-      <ellipse cx="256" cy="296" rx="92" ry="24" fill="#fff7ed" stroke="#e7e5e4" stroke-width="6"/>
-      <path d="M 196 276 Q 256 226 316 276 Z" fill="#f59e0b"/>
-      <rect x="196" y="272" width="120" height="12" rx="6" fill="#84cc16"/>
-      <rect x="204" y="284" width="104" height="14" rx="7" fill="#7c2d12"/>
+    <!-- вредная конфета летит к рту -->
+    <g transform="translate(150 120) rotate(-18)">
+      <path d="M -34 0 L -58 -18 L -50 0 L -58 18 Z" fill="#fbcfe8" stroke="#9d174d" stroke-width="6" stroke-linejoin="round"/>
+      <path d="M 34 0 L 58 -18 L 50 0 L 58 18 Z" fill="#fbcfe8" stroke="#9d174d" stroke-width="6" stroke-linejoin="round"/>
+      <circle cx="0" cy="0" r="34" fill="url(#candy)" stroke="#9d174d" stroke-width="6"/>
+      <path d="M -18 -6 A 20 20 0 0 1 6 -20" stroke="#ffffff" stroke-width="8" fill="none" stroke-linecap="round"/>
     </g>
-    <!-- конвейерная лента -->
-    <rect x="64" y="312" width="384" height="66" rx="33" fill="#3f3f46" stroke="#27272a" stroke-width="8"/>
-    <g fill="#6d6862">
-      <rect x="104" y="324" width="14" height="42" rx="7"/>
-      <rect x="156" y="324" width="14" height="42" rx="7"/>
-      <rect x="208" y="324" width="14" height="42" rx="7"/>
-      <rect x="260" y="324" width="14" height="42" rx="7"/>
-      <rect x="312" y="324" width="14" height="42" rx="7"/>
-      <rect x="364" y="324" width="14" height="42" rx="7"/>
-      <rect x="416" y="324" width="14" height="42" rx="7"/>
+    <!-- брокколи-защитник -->
+    <g transform="translate(392 120)">
+      <rect x="-14" y="18" width="28" height="42" rx="12" fill="#86efac" stroke="#15803d" stroke-width="8"/>
+      <circle cx="-22" cy="0" r="26" fill="#22c55e" stroke="#15803d" stroke-width="8"/>
+      <circle cx="22" cy="0" r="24" fill="#16a34a" stroke="#15803d" stroke-width="8"/>
+      <circle cx="0" cy="-20" r="26" fill="#4ade80" stroke="#15803d" stroke-width="8"/>
     </g>
   </g>
 </svg>`

@@ -1,15 +1,12 @@
 import type { SaveData } from './types'
 
-const KEY = 'chef-conveyor-save-v1'
+const KEY = 'foodstorator-td-save-v1'
 
 const DEFAULT: SaveData = {
   sound: true,
-  music: true,
   bestWave: 0,
   wins: 0,
   runs: 0,
-  bestTips: 0,
-  seenHowTo: false,
 }
 
 export function loadSave(): SaveData {

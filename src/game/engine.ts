@@ -1,87 +1,78 @@
 import {
-  PATH_LEN, pointAt, BLOCKED, COLS, ROWS, CELL,
-  STATIONS, RECIPES, WAVES, CARDS, STEP_INFO,
-  DISH_SPEED, FREEZE_SLOW, START_MONEY, START_REP, BURN_LIMIT,
-  REP_FAIL, REP_SPOIL, REP_PERFECT, PERFECT_BONUS,
-  UPGRADE_RATE, UPG_RANGE, WAVE_SKIP_BONUS,
-  upgradeCost, sellValue,
+  BLOCKED, COLS, ROWS, CELL, PATH_LEN, pointAt,
+  ENEMIES, TOWERS, WAVES, TOTAL_WAVES, makeEndlessWave, waveHpMul,
+  START_MONEY, START_TEETH, upgradeCost, sellValue,
 } from './config'
 import type {
-  Phase, Dish, Station, FloatText, DraftCard, RunStats, HudState, StepType, StationType, Particle, ParticleKind,
+  Enemy, EnemyId, FloatText, HudState, Particle, ParticleKind, Phase,
+  Projectile, SelInfo, Tower, TowerId, Zap,
 } from './types'
 
-const STEP_TYPES: StepType[] = ['chop', 'fry', 'season', 'plate']
+interface PendingSpawn { t: number; type: EnemyId }
 
-interface PendingSpawn {
-  t: number
-  recipeId: string
-}
+const LEAK_DIST = PATH_LEN - 58 // у самых губ
+const PROJ_SPEED: Record<Projectile['kind'], number> = { pea: 430, spike: 580, ice: 390, tomato: 320 }
+const W_CENTER_X = 480
+const MOUTH_FX = 800
+const MOUTH_FY = 250
 
 export class GameEngine {
   phase: Phase = 'menu'
   money = START_MONEY
-  rep = START_REP
+  teeth = START_TEETH
+  maxTeeth = START_TEETH
   waveIdx = 0
   speed = 1
   paused = false
+  endless = false
 
-  dishes: Dish[] = []
-  stations: Station[] = []
-  pending: PendingSpawn[] = []
-  floats: FloatText[] = []
+  enemies: Enemy[] = []
+  towers: Tower[] = []
+  projectiles: Projectile[] = []
+  zaps: Zap[] = []
   particles: Particle[] = []
+  floats: FloatText[] = []
+  private pending: PendingSpawn[] = []
 
-  draft: DraftCard[] = []
-  draftPicked = false
-  placing: StationType | null = null
-  freeStation = false
-  selectedStationId: number | null = null
-  preBoostNext = false
+  placing: TowerId | null = null
+  selectedId: number | null = null
 
-  buffs = {
-    globalSpeed: 1,
-    typeSpeed: { chop: 1, fry: 1, season: 1, plate: 1, freeze: 1 } as Record<StationType, number>,
-    freezeSlow: FREEZE_SLOW,
-  }
-
-  stats: RunStats = { perfect: 0, failed: 0, spoiled: 0, tips: 0 }
+  chompT = 0    // анимация жевания рта
+  shakeT = 0    // тряска экрана
+  redFlash = 0  // красная вспышка при потере зуба
 
   time = 0
   private nextId = 1
   private occupied = new Map<string, number>()
   private lastHudKey = ''
-  private hudDirty = false
+  private hudDirty = true
+  private lastSfx = new Map<string, number>()
 
   sfx: (name: string) => void = () => {}
-  onBanner: (text: string, tone: 'info' | 'good') => void = () => {}
-  onRunEnd: (win: boolean, stats: RunStats, waveIdx: number) => void = () => {}
   onHud: () => void = () => {}
+  onRunEnd: (win: boolean, waveReached: number) => void = () => {}
 
   // ---------- Жизненный цикл ----------
   startRun() {
     this.phase = 'build'
     this.money = START_MONEY
-    this.rep = START_REP
+    this.teeth = START_TEETH
     this.waveIdx = 0
     this.speed = 1
     this.paused = false
-    this.dishes = []
-    this.stations = []
-    this.pending = []
-    this.floats = []
+    this.endless = false
+    this.enemies = []
+    this.towers = []
+    this.projectiles = []
+    this.zaps = []
     this.particles = []
-    this.draft = []
-    this.draftPicked = false
+    this.floats = []
+    this.pending = []
     this.placing = null
-    this.freeStation = false
-    this.selectedStationId = null
-    this.preBoostNext = false
-    this.stats = { perfect: 0, failed: 0, spoiled: 0, tips: 0 }
-    this.buffs = {
-      globalSpeed: 1,
-      typeSpeed: { chop: 1, fry: 1, season: 1, plate: 1, freeze: 1 },
-      freezeSlow: FREEZE_SLOW,
-    }
+    this.selectedId = null
+    this.chompT = 0
+    this.shakeT = 0
+    this.redFlash = 0
     this.occupied.clear()
     this.touchHud(true)
   }
@@ -91,20 +82,39 @@ export class GameEngine {
     this.touchHud(true)
   }
 
+  continueEndless() {
+    if (this.phase !== 'victory') return
+    this.endless = true
+    this.phase = 'build'
+    this.sfx('click')
+    this.touchHud(true)
+  }
+
+  /** Отладочный переход к волне (для тестов: ?wave=N) */
+  debugJump(wave: number) {
+    if (!Number.isFinite(wave)) return
+    this.waveIdx = Math.max(0, Math.min(TOTAL_WAVES - 1, Math.round(wave) - 1))
+    this.money = Math.max(this.money, 400 + this.waveIdx * 60)
+    this.touchHud(true)
+  }
+
   startWave() {
-    if (this.phase !== 'build' && this.phase !== 'draft') return
-    const wave = WAVES[this.waveIdx]
+    if (this.phase !== 'build') return
+    const wave = this.waveIdx < TOTAL_WAVES ? WAVES[this.waveIdx] : makeEndlessWave(this.waveIdx + 1)
     this.pending = []
-    for (const s of wave.streams) {
-      for (let i = 0; i < s.count; i++) {
-        this.pending.push({ t: s.delay + i * s.interval, recipeId: s.recipeId })
+    for (const g of wave.groups) {
+      for (let i = 0; i < g.count; i++) {
+        this.pending.push({ t: g.delay + i * g.gap, type: g.type })
       }
     }
     this.pending.sort((a, b) => a.t - b.t)
     this.phase = 'wave'
-    this.draftPicked = false
+    this.placing = null
+    this.selectedId = null
     this.sfx('wave')
-    this.onBanner(`Волна ${this.waveIdx + 1} — ${WAVES[this.waveIdx].name}`, 'info')
+    const boss = wave.groups.some((g) => g.type === 'cake' || g.type === 'choco')
+    if (boss) this.sfx('boss')
+    this.addFloat(`Волна ${this.waveIdx + 1} — ${wave.name}`, W_CENTER_X, 80, '#fbbf24', 22)
     this.touchHud(true)
   }
 
@@ -113,24 +123,27 @@ export class GameEngine {
     const dt = Math.min(0.05, dtReal) * (this.paused ? 0 : this.speed)
     this.time += dtReal
 
-    if (this.phase === 'wave' && dt > 0) {
-      // спавн заказов
+    if ((this.phase === 'wave') && dt > 0) {
       while (this.pending.length > 0 && this.pending[0].t <= 0) {
         const s = this.pending.shift()!
-        this.spawnDish(s.recipeId)
+        this.spawnEnemy(s.type)
       }
       for (const p of this.pending) p.t -= dt
 
-      this.moveDishes(dt)
-      this.runStations(dt)
+      this.moveEnemies(dt)
+      this.runTowers(dt)
+      this.moveProjectiles(dt)
+      for (const z of this.zaps) z.life -= dt
+      this.zaps = this.zaps.filter((z) => z.life > 0)
 
-      // конец волны
-      if (this.pending.length === 0 && this.dishes.length === 0) {
-        this.finishWave()
-      }
+      if (this.pending.length === 0 && this.enemies.length === 0) this.finishWave()
     }
 
-    // плавающие тексты и частицы живут всегда (визуальный слой)
+    // визуальные таймеры идут в реальном времени
+    this.chompT = Math.max(0, this.chompT - dtReal * 1.6)
+    this.shakeT = Math.max(0, this.shakeT - dtReal)
+    this.redFlash = Math.max(0, this.redFlash - dtReal * 1.4)
+
     for (const f of this.floats) f.life -= dtReal
     this.floats = this.floats.filter((f) => f.life > 0)
 
@@ -138,234 +151,320 @@ export class GameEngine {
       p.life -= dtReal
       p.x += p.vx * dtReal
       p.y += p.vy * dtReal
-      if (p.kind === 'spark' || p.kind === 'star') p.vy += 240 * dtReal
+      if (p.kind === 'crumb' || p.kind === 'spark') p.vy += 260 * dtReal
+      if (p.kind === 'smoke') p.vy -= 40 * dtReal
     }
     this.particles = this.particles.filter((p) => p.life > 0)
 
     this.touchHud(false)
   }
 
-  private spawnDish(recipeId: string) {
-    const r = RECIPES[recipeId]
-    const dish: Dish = {
+  private spawnEnemy(type: EnemyId) {
+    const def = ENEMIES[type]
+    const hp = Math.round(def.hp * waveHpMul(this.waveIdx))
+    const pos = pointAt(0)
+    this.enemies.push({
       id: this.nextId++,
-      recipeId,
+      type,
+      hp,
+      maxHp: hp,
       dist: 0,
-      prog: { chop: 0, fry: 0, season: 0, plate: 0 },
-      heat: 0,
-      spoiled: false,
+      x: pos.x,
+      y: pos.y,
+      ang: pos.ang,
       bob: Math.random() * Math.PI * 2,
-      slowNow: false,
-    }
-    if (this.preBoostNext) {
-      const first = r.steps[0]
-      dish.prog[first.type] = Math.min(first.count, dish.prog[first.type] + 1)
-    }
-    this.dishes.push(dish)
-  }
-
-  private moveDishes(dt: number) {
-    for (const d of this.dishes) {
-      const pos = pointAt(d.dist)
-      // дым от сгоревшего блюда тянется за ним
-      if (d.spoiled && Math.random() < dt * 5) {
-        this.puffAt(pos.x, pos.y - 16, 'smoke', 1, 10, 26, 6, '#57534e', 0.9)
-      }
-      let slow = 1
-      for (const st of this.stations) {
-        if (st.type !== 'freeze') continue
-        if (Math.hypot(st.x - pos.x, st.y - pos.y) <= this.rangeOf(st)) {
-          slow = Math.min(slow, this.buffs.freezeSlow)
-        }
-      }
-      d.slowNow = slow < 1
-      d.dist += DISH_SPEED * slow * dt
-      d.bob += dt * 6
-      if (d.dist >= PATH_LEN) {
-        this.resolveDish(d)
-      }
-    }
-    this.dishes = this.dishes.filter((d) => d.dist < PATH_LEN)
-  }
-
-  private rangeOf(st: Station): number {
-    return STATIONS[st.type].range * Math.pow(UPG_RANGE, st.level - 1)
-  }
-
-  private cdOf(st: Station): number {
-    const def = STATIONS[st.type]
-    const buff = this.buffs.globalSpeed * this.buffs.typeSpeed[st.type]
-    return def.cd / (Math.pow(UPGRADE_RATE, st.level - 1) * buff)
-  }
-
-  private runStations(dt: number) {
-    for (const st of this.stations) {
-      if (st.type === 'freeze') continue
-      if (st.flash > 0) st.flash -= dt
-      st.cd -= dt
-      if (st.cd > 0) continue
-
-      const range = this.rangeOf(st)
-      const type = st.type as StepType
-      let target: Dish | null = null
-      let burnTarget: Dish | null = null
-
-      for (const d of this.dishes) {
-        if (d.spoiled) continue
-        const pos = pointAt(d.dist)
-        if (Math.hypot(st.x - pos.x, st.y - pos.y) > range) continue
-        const r = RECIPES[d.recipeId]
-        const req = r.steps.find((s) => s.type === type)?.count ?? 0
-        if (req > 0 && d.prog[type] < req) {
-          if (!target || d.dist > target.dist) target = d
-        } else if (st.type === 'fry' && req > 0 && d.prog[type] >= req) {
-          // лишняя жарка — добавляет жар; 3 лишних — блюдо сгорает
-          if (!burnTarget || d.dist > burnTarget.dist) burnTarget = d
-        }
-      }
-
-      if (target) {
-        target.prog[type]++
-        st.flash = 0.22
-        st.cd = this.cdOf(st)
-        // искры и парок над блюдом при выполнении шага
-        const tp = pointAt(target.dist)
-        this.puffAt(tp.x, tp.y - 10, 'spark', 3, 70, 50, 2.6, '#fbbf24', 0.45)
-        this.puffAt(tp.x, tp.y - 16, 'steam', 1, 14, 34, 7, '#eee9e2', 0.85)
-      } else if (burnTarget) {
-        burnTarget.heat++
-        st.flash = 0.3
-        st.cd = this.cdOf(st)
-        const bp = pointAt(burnTarget.dist)
-        if (burnTarget.heat >= BURN_LIMIT) {
-          burnTarget.spoiled = true
-          this.puffAt(bp.x, bp.y - 14, 'smoke', 7, 46, 40, 7, '#57534e', 1.1)
-          this.addFloat('🔥 сгорело!', bp.x, bp.y - 34, '#ef4444', 15)
-          this.sfx('burn')
-        } else {
-          this.puffAt(bp.x, bp.y - 16, 'steam', 1, 12, 30, 6, '#e7e5e4', 0.7)
-        }
-      } else {
-        st.cd = 0
-      }
-    }
-  }
-
-  private resolveDish(d: Dish) {
-    const r = RECIPES[d.recipeId]
-    const pos = pointAt(PATH_LEN - 20)
-    let money = 0
-    if (d.spoiled) {
-      this.rep = Math.max(0, this.rep - REP_SPOIL)
-      this.stats.spoiled++
-      this.addFloat(`−${REP_SPOIL}⭐ ${r.emoji}`, pos.x, pos.y - 30, '#ef4444', 16)
-      this.puffAt(pos.x, pos.y - 14, 'smoke', 5, 40, 36, 6, '#57534e', 1.0)
-      this.sfx('fail')
-    } else {
-      const missing = r.steps.filter((s) => d.prog[s.type] < s.count)
-      if (missing.length === 0) {
-        money = Math.round(r.price * (1 + PERFECT_BONUS))
-        this.money += money
-        this.rep = Math.min(100, this.rep + REP_PERFECT)
-        this.stats.perfect++
-        this.stats.tips += money
-        this.addFloat(`+${money}₽ идеально!`, pos.x, pos.y - 30, '#22c55e', 16)
-        this.puffAt(pos.x, pos.y - 22, 'star', 7, 90, 80, 15, '#fbbf24', 0.85)
-        this.sfx('coin')
-      } else {
-        this.rep = Math.max(0, this.rep - REP_FAIL)
-        this.stats.failed++
-        this.addFloat(`−${REP_FAIL}⭐ ${r.emoji}`, pos.x, pos.y - 30, '#f97316', 15)
-        this.puffAt(pos.x, pos.y - 16, 'puff', 4, 55, 34, 8, '#fb923c', 0.7)
-        this.sfx('fail')
-      }
-    }
-    if (this.rep <= 0) {
-      this.phase = 'gameover'
-      this.placing = null
-      this.freeStation = false
-      this.selectedStationId = null
-      this.onRunEnd(false, this.stats, this.waveIdx)
-      this.sfx('lose')
-    }
+      slowT: 0,
+      slowF: 1,
+      burnT: 0,
+      burnDps: 0,
+      hitFlash: 0,
+    })
     this.touchHud(true)
+  }
+
+  private moveEnemies(dt: number) {
+    const leak: Enemy[] = []
+    for (const e of this.enemies) {
+      const def = ENEMIES[e.type]
+      // статусы
+      if (e.slowT > 0) e.slowT -= dt
+      if (e.burnT > 0) {
+        e.burnT -= dt
+        this.hitEnemy(e, e.burnDps * dt, true)
+        if (Math.random() < dt * 8) {
+          this.puffAt(e.x, e.y - 8, 'spark', 1, 20, 30, 4, '#fb923c', 0.4)
+        }
+        if (e.hp <= 0) continue
+      }
+      if (e.hitFlash > 0) e.hitFlash -= dt
+
+      const mul = e.slowT > 0 ? e.slowF : 1
+      e.dist += def.speed * mul * dt
+      e.bob += dt * 9 * (def.speed / 80)
+      const pos = pointAt(e.dist)
+      e.x = pos.x
+      e.y = pos.y
+      e.ang = pos.ang
+      if (e.dist >= LEAK_DIST) leak.push(e)
+    }
+
+    // убираем сбитых (иначе «трупы» копятся и блокируют конец волны)
+    if (this.enemies.some((e) => e.hp <= 0)) {
+      this.enemies = this.enemies.filter((e) => e.hp > 0)
+    }
+
+    if (leak.length > 0) {
+      this.enemies = this.enemies.filter((e) => !leak.includes(e))
+      this.teeth -= leak.length
+      this.chompT = 0.62
+      this.shakeT = 0.4
+      this.redFlash = 0.55
+      this.sfx('chomp')
+      this.addFloat(leak.length > 1 ? `−${leak.length} зуба!` : '−1 зуб!', MOUTH_FX, MOUTH_FY, '#f87171', 20)
+      for (let i = 0; i < 6; i++) {
+        this.puffAt(MOUTH_FX - 20, MOUTH_FY, 'tooth', 1, 60, 80, 7, '#ffffff', 0.8)
+      }
+      this.touchHud(true)
+      if (this.teeth <= 0) {
+        this.teeth = 0
+        this.phase = 'gameover'
+        this.placing = null
+        this.selectedId = null
+        this.onRunEnd(false, this.waveIdx + 1)
+        this.sfx('lose')
+      }
+    }
+  }
+
+  private runTowers(dt: number) {
+    for (const t of this.towers) {
+      const def = TOWERS[t.type]
+      const lv = def.levels[t.level - 1]
+      if (t.fireAnim > 0) t.fireAnim -= dt
+
+      if (def.kind === 'flame') {
+        // огнемёт: непрерывная струя по всем в радиусе
+        const inRange = this.enemies.filter((e) => e.hp > 0 && Math.hypot(e.x - t.x, e.y - t.y) <= lv.range)
+        if (inRange.length > 0) {
+          t.flameOn = 0.25
+          inRange.sort((a, b) => b.dist - a.dist)
+          const targets = inRange.slice(0, 6)
+          for (const e of targets) {
+            this.hitEnemy(e, lv.dmg * dt)
+            e.burnT = def.burnDur ?? 2
+            e.burnDps = def.burn ?? 6
+          }
+          const near = targets[0]
+          t.ang = Math.atan2(near.y - t.y, near.x - t.x)
+          if (Math.random() < dt * 30) {
+            const a = t.ang + (Math.random() - 0.5) * 0.5
+            this.particles.push({
+              id: this.nextId++,
+              kind: 'spark',
+              x: t.x + Math.cos(t.ang) * 14,
+              y: t.y + Math.sin(t.ang) * 14,
+              vx: Math.cos(a) * 160 * Math.random(),
+              vy: Math.sin(a) * 160 * Math.random() - 20,
+              life: 0.35,
+              maxLife: 0.35,
+              size: 6 * Math.random() + 3,
+              color: Math.random() < 0.5 ? '#fb923c' : '#fde047',
+            })
+          }
+          this.throttledSfx('flame', 0.4)
+        } else {
+          t.flameOn = Math.max(0, t.flameOn - dt)
+        }
+        continue
+      }
+
+      t.cd -= dt
+      const target = this.pickTarget(t, lv.range)
+      if (target) t.ang = Math.atan2(target.y - t.y, target.x - t.x)
+
+      if (t.cd > 0 || !target) continue
+      t.cd = 1 / Math.max(0.05, lv.rate)
+      t.fireAnim = 0.15
+
+      if (def.kind === 'chain') {
+        this.fireChain(t, target, lv.dmg, def.chains ?? 2)
+        this.sfx('zap')
+      } else if (def.kind === 'lob') {
+        this.fireLob(t, target, lv.dmg, def.splash ?? 50)
+        this.sfx('splat')
+      } else {
+        const kind: Projectile['kind'] = t.type === 'carrot' ? 'spike' : t.type === 'berry' ? 'ice' : 'pea'
+        this.fireShot(t, target, kind, lv.dmg, def.slowFactor ?? 1, def.slowDur ?? 0)
+        this.sfx(t.type === 'berry' ? 'freeze' : t.type === 'carrot' ? 'shoot2' : 'shoot')
+      }
+    }
+  }
+
+  private pickTarget(t: Tower, range: number): Enemy | null {
+    let best: Enemy | null = null
+    for (const e of this.enemies) {
+      if (e.hp <= 0) continue
+      if (Math.hypot(e.x - t.x, e.y - t.y) > range) continue
+      if (!best || e.dist > best.dist) best = e
+    }
+    return best
+  }
+
+  private fireShot(t: Tower, target: Enemy, kind: Projectile['kind'], dmg: number, slowF: number, slowDur: number) {
+    const a = Math.atan2(target.y - t.y, target.x - t.x)
+    const sp = PROJ_SPEED[kind]
+    this.projectiles.push({
+      id: this.nextId++,
+      kind,
+      x: t.x + Math.cos(a) * 14,
+      y: t.y + Math.sin(a) * 14,
+      vx: Math.cos(a) * sp,
+      vy: Math.sin(a) * sp,
+      targetId: target.id,
+      lx: target.x,
+      ly: target.y,
+      dmg,
+      splash: 0,
+      slowF,
+      slowDur,
+      lobT: 0,
+      lobTMax: 0,
+      sx: 0, sy: 0, tx: 0, ty: 0, arcH: 0,
+    })
+  }
+
+  private fireLob(t: Tower, target: Enemy, dmg: number, splash: number) {
+    const def = ENEMIES[target.type]
+    const dist = Math.hypot(target.x - t.x, target.y - t.y)
+    const T = Math.max(0.35, Math.min(0.95, dist / PROJ_SPEED.tomato))
+    // упреждение: цель за время полёта проползёт ещё немного
+    const future = pointAt(target.dist + def.speed * (target.slowT > 0 ? target.slowF : 1) * T)
+    this.projectiles.push({
+      id: this.nextId++,
+      kind: 'tomato',
+      x: t.x, y: t.y,
+      vx: 0, vy: 0,
+      targetId: 0,
+      lx: 0, ly: 0,
+      dmg,
+      splash,
+      slowF: 1, slowDur: 0,
+      lobT: 0,
+      lobTMax: T,
+      sx: t.x, sy: t.y,
+      tx: future.x, ty: future.y,
+      arcH: 34 + dist * 0.12,
+    })
+  }
+
+  private fireChain(t: Tower, primary: Enemy, dmg: number, chains: number) {
+    const hit = new Set<number>([primary.id])
+    const pts = [{ x: t.x, y: t.y }, { x: primary.x, y: primary.y }]
+    this.hitEnemy(primary, dmg)
+    let from = primary
+    for (let i = 1; i < chains; i++) {
+      let next: Enemy | null = null
+      for (const e of this.enemies) {
+        if (e.hp <= 0 || hit.has(e.id)) continue
+        if (Math.hypot(e.x - from.x, e.y - from.y) > 85) continue
+        if (!next || Math.hypot(e.x - from.x, e.y - from.y) < Math.hypot(next.x - from.x, next.y - from.y)) next = e
+      }
+      if (!next) break
+      hit.add(next.id)
+      pts.push({ x: next.x, y: next.y })
+      this.hitEnemy(next, dmg * 0.8)
+      from = next
+    }
+    this.zaps.push({ id: this.nextId++, pts, life: 0.18 })
+  }
+
+  private moveProjectiles(dt: number) {
+    const keep: Projectile[] = []
+    for (const p of this.projectiles) {
+      if (p.kind === 'tomato') {
+        p.lobT += dt
+        const t = Math.min(1, p.lobT / p.lobTMax)
+        p.x = p.sx + (p.tx - p.sx) * t
+        p.y = p.sy + (p.ty - p.sy) * t
+        if (t >= 1) {
+          this.tomatoSplash(p)
+          continue
+        }
+        keep.push(p)
+        continue
+      }
+      const target = this.enemies.find((e) => e.id === p.targetId && e.hp > 0)
+      if (target) { p.lx = target.x; p.ly = target.y }
+      const dx = p.lx - p.x
+      const dy = p.ly - p.y
+      const d = Math.hypot(dx, dy)
+      const sp = PROJ_SPEED[p.kind]
+      const step = sp * dt
+      const r = target ? ENEMIES[target.type].r : 6
+      if (d <= step + r * 0.5) {
+        if (target) {
+          this.hitEnemy(target, p.dmg)
+          if (p.slowDur > 0 && target.hp > 0) {
+            target.slowT = p.slowDur
+            target.slowF = p.slowF
+            this.puffAt(p.lx, p.ly, 'frost', 3, 40, 20, 4, '#a5f3fc', 0.5)
+          }
+          this.puffAt(p.lx, p.ly, 'splat', 3, 50, 30, 4, p.kind === 'ice' ? '#a5f3fc' : '#a3e635', 0.45)
+        }
+        continue
+      }
+      p.vx = (dx / d) * sp
+      p.vy = (dy / d) * sp
+      p.x += p.vx * dt
+      p.y += p.vy * dt
+      keep.push(p)
+    }
+    this.projectiles = keep
+  }
+
+  private tomatoSplash(p: Projectile) {
+    this.puffAt(p.tx, p.ty, 'splat', 10, 90, 50, 6, '#ef4444', 0.55)
+    for (const e of this.enemies) {
+      if (e.hp <= 0) continue
+      if (Math.hypot(e.x - p.tx, e.y - p.ty) <= p.splash + ENEMIES[e.type].r * 0.5) {
+        this.hitEnemy(e, p.dmg)
+      }
+    }
+  }
+
+  /** Урон с учётом брони; kill=false — это DoT, звук не нужен */
+  private hitEnemy(e: Enemy, raw: number, dot = false) {
+    if (e.hp <= 0) return
+    const def = ENEMIES[e.type]
+    const dmg = Math.max(dot ? 0 : 1, raw - def.armor)
+    e.hp -= dmg
+    if (!dot) e.hitFlash = 0.12
+    if (e.hp <= 0) {
+      e.hp = 0
+      this.money += def.bounty
+      this.addFloat(`+${def.bounty}₽`, e.x, e.y - 18, '#fbbf24', 13)
+      this.puffAt(e.x, e.y, 'crumb', 8, 90, 60, 4.5, def.tint, 0.6)
+      this.puffAt(e.x, e.y, 'crumb', 3, 70, 80, 3, '#ffffff', 0.5)
+      this.throttledSfx('splat', 0.08)
+      this.touchHud(true)
+    }
   }
 
   private finishWave() {
-    const bonus = 30 + (this.waveIdx + 1) * 8
+    const bonus = 26 + (this.waveIdx + 1) * 5
     this.money += bonus
-    this.addFloat(`+${bonus}₽ волна пройдена`, 640, 360, '#f59e0b', 20)
+    this.addFloat(`+${bonus}₽ волна пройдена`, W_CENTER_X, 140, '#fbbf24', 20)
     this.waveIdx++
-    if (this.waveIdx >= WAVES.length) {
+    if (this.waveIdx === TOTAL_WAVES) {
       this.phase = 'victory'
       this.placing = null
-      this.freeStation = false
-      this.selectedStationId = null
-      this.onRunEnd(true, this.stats, this.waveIdx)
+      this.selectedId = null
+      this.onRunEnd(true, this.waveIdx)
       this.sfx('win')
     } else {
-      this.phase = 'draft'
-      this.draftPicked = false
-      this.draft = this.rollDraft()
-      this.sfx('draft')
-      this.onBanner('Волна пройдена! Выбери буст', 'good')
+      this.phase = 'build'
+      this.sfx('coin')
     }
-    this.touchHud(true)
-  }
-
-  // ---------- Draft ----------
-  private rollDraft(): DraftCard[] {
-    const pool = [...CARDS]
-    const picked: DraftCard[] = []
-    while (picked.length < 3 && pool.length > 0) {
-      const total = pool.reduce((s, c) => s + c.weight, 0)
-      let roll = Math.random() * total
-      let idx = 0
-      for (let i = 0; i < pool.length; i++) {
-        roll -= pool[i].weight
-        if (roll <= 0) {
-          idx = i
-          break
-        }
-      }
-      const c = pool.splice(idx, 1)[0]
-      picked.push({ id: c.id, emoji: c.emoji, title: c.title, desc: c.desc, accent: c.accent })
-    }
-    return picked
-  }
-
-  pickDraft(cardId: string) {
-    if (this.phase !== 'draft') return
-    const card = this.draft.find((c) => c.id === cardId)
-    if (!card) return
-    switch (card.id) {
-      case 'tips100': this.money += 100; break
-      case 'tips200': this.money += 200; break
-      case 'chefSpeed': this.buffs.globalSpeed *= 1.12; break
-      case 'chopSpeed': this.buffs.typeSpeed.chop *= 1.3; break
-      case 'frySpeed': this.buffs.typeSpeed.fry *= 1.3; break
-      case 'seasonSpeed': this.buffs.typeSpeed.season *= 1.3; break
-      case 'plateSpeed': this.buffs.typeSpeed.plate *= 1.3; break
-      case 'freezeBoost': this.buffs.freezeSlow = Math.max(0.25, this.buffs.freezeSlow - 0.1); break
-      case 'rep15': this.rep = Math.min(100, this.rep + 15); break
-      case 'preBoost': this.preBoostNext = true; break
-      case 'freeStation':
-        this.freeStation = true
-        this.placing = null
-        break
-    }
-    this.draftPicked = true
-    this.phase = 'build'
-    this.sfx('click')
-    this.touchHud(true)
-  }
-
-  skipDraft() {
-    if (this.phase !== 'draft') return
-    this.money += WAVE_SKIP_BONUS
-    this.draftPicked = true
-    this.phase = 'build'
-    this.sfx('coin')
     this.touchHud(true)
   }
 
@@ -376,91 +475,128 @@ export class GameEngine {
     return !this.occupied.has(`${cx},${cy}`)
   }
 
-  beginPlacing(type: StationType) {
-    if (this.phase !== 'build' && this.phase !== 'wave' && this.phase !== 'draft') return
-    if (!this.freeStation && this.money < STATIONS[type].cost) {
+  beginPlacing(type: TowerId) {
+    if (this.phase !== 'build' && this.phase !== 'wave') return
+    if (this.money < TOWERS[type].cost) {
       this.sfx('error')
       return
     }
     this.placing = type
-    this.selectedStationId = null
+    this.selectedId = null
     this.sfx('click')
     this.touchHud(true)
   }
 
   cancelPlacing() {
-    if (this.placing || this.freeStation) {
+    if (this.placing) {
       this.placing = null
-      this.freeStation = false
       this.touchHud(true)
     }
   }
 
-  tryPlace(cx: number, cy: number): boolean {
+  canvasClick(cx: number, cy: number) {
+    if (this.phase !== 'build' && this.phase !== 'wave') return
+    if (this.placing) {
+      this.tryPlace(cx, cy)
+      return
+    }
+    const t = this.towers.find((tw) => tw.cx === cx && tw.cy === cy)
+    if (t) {
+      this.selectedId = t.id
+      this.sfx('click')
+    } else {
+      this.selectedId = null
+    }
+    this.touchHud(true)
+  }
+
+  private tryPlace(cx: number, cy: number): boolean {
     if (!this.placing) return false
     if (!this.canPlaceAt(cx, cy)) {
-      this.addFloat('⛔ нельзя на конвейере', cx * CELL + CELL / 2, cy * CELL, '#ef4444', 13)
       this.sfx('error')
       return false
     }
     const type = this.placing
-    const def = STATIONS[type]
-    const cost = this.freeStation ? 0 : def.cost
-    if (this.money < cost) {
+    const def = TOWERS[type]
+    if (this.money < def.cost) {
       this.sfx('error')
+      this.placing = null
       return false
     }
-    this.money -= cost
-    const st: Station = {
+    this.money -= def.cost
+    const tower: Tower = {
       id: this.nextId++,
       type,
       level: 1,
-      cx,
-      cy,
+      cx, cy,
       x: cx * CELL + CELL / 2,
       y: cy * CELL + CELL / 2,
       cd: 0,
-      invested: cost,
-      flash: 0,
+      ang: 0,
+      invested: def.cost,
+      fireAnim: 0,
+      flameOn: 0,
     }
-    this.stations.push(st)
-    this.occupied.set(`${cx},${cy}`, st.id)
+    this.towers.push(tower)
+    this.occupied.set(`${cx},${cy}`, tower.id)
+    this.puffAt(tower.x, tower.y, 'frost', 6, 60, 50, 4, def.color, 0.5)
     this.placing = null
-    this.freeStation = false
     this.sfx('place')
     this.touchHud(true)
     return true
   }
 
-  selectStation(id: number | null) {
-    this.selectedStationId = id
-    if (id !== null) this.placing = null
-    this.touchHud(true)
+  getSelected(): SelInfo | null {
+    if (this.selectedId === null) return null
+    const t = this.towers.find((tw) => tw.id === this.selectedId)
+    if (!t) return null
+    const def = TOWERS[t.type]
+    const lv = def.levels[t.level - 1]
+    const maxed = t.level >= 3
+    const upCost = maxed ? 0 : upgradeCost(t.type, t.level)
+    const dps = def.kind === 'flame' ? lv.dmg + (def.burn ?? 0) : lv.dmg * lv.rate
+    return {
+      id: t.id,
+      type: t.type,
+      level: t.level,
+      invested: t.invested,
+      dmg: lv.dmg,
+      rate: lv.rate,
+      range: lv.range,
+      upCost,
+      sell: sellValue(t.invested),
+      maxed,
+      dps: Math.round(dps),
+    }
   }
 
-  upgradeStation(id: number) {
-    const st = this.stations.find((s) => s.id === id)
-    if (!st || st.level >= 3) return
-    const cost = upgradeCost(st.type, st.level)
+  upgradeSelected() {
+    if (this.selectedId === null) return
+    const t = this.towers.find((tw) => tw.id === this.selectedId)
+    if (!t || t.level >= 3) return
+    const cost = upgradeCost(t.type, t.level)
     if (this.money < cost) {
       this.sfx('error')
       return
     }
     this.money -= cost
-    st.invested += cost
-    st.level++
+    t.invested += cost
+    t.level++
+    this.puffAt(t.x, t.y, 'spark', 8, 70, 70, 4, '#fbbf24', 0.6)
     this.sfx('upgrade')
     this.touchHud(true)
   }
 
-  sellStation(id: number) {
-    const idx = this.stations.findIndex((s) => s.id === id)
+  sellSelected() {
+    if (this.selectedId === null) return
+    const idx = this.towers.findIndex((tw) => tw.id === this.selectedId)
     if (idx === -1) return
-    const st = this.stations[idx]
-    this.money += sellValue(st.invested)
-    this.occupied.delete(`${st.cx},${st.cy}`)
-    this.stations.splice(idx, 1)
-    if (this.selectedStationId === id) this.selectedStationId = null
+    const t = this.towers[idx]
+    this.money += sellValue(t.invested)
+    this.occupied.delete(`${t.cx},${t.cy}`)
+    this.puffAt(t.x, t.y, 'smoke', 5, 50, 40, 5, '#a8a29e', 0.7)
+    this.towers.splice(idx, 1)
+    this.selectedId = null
     this.sfx('sell')
     this.touchHud(true)
   }
@@ -472,25 +608,49 @@ export class GameEngine {
   }
 
   togglePause() {
-    this.paused = !this.paused
-    this.touchHud(true)
+    if (this.phase === 'wave') {
+      this.paused = !this.paused
+      this.touchHud(true)
+    }
   }
 
-  setPaused(v: boolean) {
-    this.paused = v
-    this.touchHud(true)
+  waveComposition(): { type: EnemyId; name: string; count: number }[] {
+    const wave = this.waveIdx < TOTAL_WAVES ? WAVES[this.waveIdx] : makeEndlessWave(this.waveIdx + 1)
+    const map = new Map<EnemyId, number>()
+    for (const g of wave.groups) map.set(g.type, (map.get(g.type) ?? 0) + g.count)
+    return [...map.entries()].map(([type, count]) => ({ type, name: ENEMIES[type].name, count }))
   }
 
-/** Рождение частиц-эффектов (визуальный слой) */
+  getHud(): HudState {
+    const wave = this.waveIdx < TOTAL_WAVES ? WAVES[this.waveIdx] : makeEndlessWave(this.waveIdx + 1)
+    return {
+      phase: this.phase,
+      money: Math.round(this.money),
+      teeth: this.teeth,
+      maxTeeth: this.maxTeeth,
+      waveIdx: this.waveIdx,
+      totalWaves: TOTAL_WAVES,
+      alive: this.enemies.length,
+      remaining: this.pending.length + this.enemies.length,
+      speed: this.speed,
+      paused: this.paused,
+      placing: this.placing,
+      selected: this.getSelected(),
+      waveName: this.phase === 'victory' ? 'Победа!' : wave.name,
+      endless: this.endless,
+    }
+  }
+
+  // ---------- Вспомогательное ----------
   private puffAt(x: number, y: number, kind: ParticleKind, count: number, spread: number, up: number, size: number, color: string, life: number) {
     for (let i = 0; i < count; i++) {
-      if (this.particles.length > 240) return
+      if (this.particles.length > 260) return
       const a = Math.random() * Math.PI * 2
       const v = spread * (0.4 + Math.random() * 0.6)
       this.particles.push({
         id: this.nextId++,
         kind,
-        x: x + (Math.random() - 0.5) * 10,
+        x: x + (Math.random() - 0.5) * 8,
         y: y + (Math.random() - 0.5) * 6,
         vx: Math.cos(a) * v,
         vy: Math.sin(a) * v * 0.6 - up,
@@ -503,71 +663,16 @@ export class GameEngine {
   }
 
   addFloat(text: string, x: number, y: number, color: string, size: number) {
-    this.floats.push({
-      id: this.nextId++,
-      text,
-      x,
-      y,
-      life: 1.6,
-      maxLife: 1.6,
-      color,
-      size,
-    })
-    if (this.floats.length > 24) this.floats.shift()
+    this.floats.push({ id: this.nextId++, text, x, y, life: 1.5, maxLife: 1.5, color, size })
+    if (this.floats.length > 20) this.floats.shift()
   }
 
-  /** Следующие блюда для превью у склада */
-  queuePreview(): string[] {
-    return this.pending.slice(0, 3).map((p) => RECIPES[p.recipeId].emoji)
-  }
-
-  /** Состав следующей волны: какие блюда и сколько */
-  waveComposition(): { recipeId: string; emoji: string; count: number }[] {
-    if (this.waveIdx >= WAVES.length) return []
-    const map = new Map<string, number>()
-    for (const s of WAVES[this.waveIdx].streams) {
-      map.set(s.recipeId, (map.get(s.recipeId) ?? 0) + s.count)
-    }
-    return [...map.entries()].map(([rid, count]) => ({
-      recipeId: rid,
-      emoji: RECIPES[rid].emoji,
-      count,
-    }))
-  }
-
-  /** Превью волны с шагами рецептов для HUD */
-  nextWavePreview(): { emoji: string; count: number; steps: string }[] {
-    return this.waveComposition().map((c) => {
-      const r = RECIPES[c.recipeId]
-      const steps = r.steps.map((s) => STEP_INFO[s.type].emoji.repeat(s.count)).join(' ')
-      return { emoji: r.emoji, count: c.count, steps }
-    })
-  }
-
-  getHud(): HudState {
-    const sel = this.selectedStationId !== null
-      ? this.stations.find((s) => s.id === this.selectedStationId) ?? null
-      : null
-    return {
-      phase: this.phase,
-      money: Math.round(this.money),
-      rep: Math.round(this.rep),
-      waveIdx: this.waveIdx,
-      totalWaves: WAVES.length,
-      alive: this.dishes.length,
-      remaining: this.pending.length + this.dishes.length,
-      speed: this.speed,
-      paused: this.paused,
-      draft: this.draft,
-      draftPicked: this.draftPicked,
-      selectedStationId: this.selectedStationId,
-      selectedStation: sel ? { id: sel.id, type: sel.type, level: sel.level, invested: sel.invested } : null,
-      placing: this.placing,
-      freeStation: this.freeStation,
-      nextWave: this.nextWavePreview(),
-      stats: { ...this.stats },
-      preBoost: this.preBoostNext,
-      lastWaveResult: null,
+  private throttledSfx(name: string, interval: number) {
+    const now = this.time
+    const last = this.lastSfx.get(name) ?? -99
+    if (now - last >= interval) {
+      this.lastSfx.set(name, now)
+      this.sfx(name)
     }
   }
 
@@ -575,7 +680,7 @@ export class GameEngine {
     if (force) {
       this.hudDirty = true
     } else {
-      const key = `${this.phase}|${Math.round(this.money)}|${Math.round(this.rep)}|${this.waveIdx}|${this.dishes.length}|${this.pending.length}|${this.speed}|${this.paused}|${this.placing}|${this.selectedStationId}|${this.draftPicked}|${this.freeStation}`
+      const key = `${this.phase}|${Math.round(this.money)}|${this.teeth}|${this.waveIdx}|${this.enemies.length}|${this.pending.length}|${this.speed}|${this.paused}|${this.placing}|${this.selectedId}|${this.endless}`
       if (key !== this.lastHudKey) {
         this.lastHudKey = key
         this.hudDirty = true

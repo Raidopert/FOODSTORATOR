@@ -1,25 +1,27 @@
-import type { RecipeDef, StationDef, WaveDef, StepType, StationType } from './types'
+import type { EnemyDef, EnemyId, TowerDef, TowerId, WaveDef } from './types'
 
 // ---------- Мир (внутреннее разрешение игры) ----------
-export const W = 1280
-export const H = 720
-export const CELL = 80
-export const COLS = W / CELL // 16
-export const ROWS = H / CELL // 9
+export const W = 960
+export const H = 600
+export const CELL = 40
+export const COLS = W / CELL // 24
+export const ROWS = H / CELL // 15
 
-// ---------- Путь конвейера: от склада до стойки ----------
+// ---------- Путь вредной еды: с левого края — в огромный рот справа ----------
 export const PATH: { x: number; y: number }[] = [
-  { x: -60, y: 360 },
-  { x: 170, y: 360 },
-  { x: 170, y: 130 },
-  { x: 470, y: 130 },
-  { x: 470, y: 590 },
-  { x: 790, y: 590 },
-  { x: 790, y: 200 },
-  { x: 1070, y: 200 },
-  { x: 1070, y: 490 },
-  { x: 1248, y: 490 },
+  { x: -40, y: 300 },
+  { x: 120, y: 300 },
+  { x: 120, y: 110 },
+  { x: 400, y: 110 },
+  { x: 400, y: 470 },
+  { x: 620, y: 470 },
+  { x: 620, y: 150 },
+  { x: 830, y: 150 },
+  { x: 830, y: 320 },
+  { x: 876, y: 320 },
 ]
+
+export const MOUTH = { x: 878, y: 320, r: 60 }
 
 const SEG: { x: number; y: number; dx: number; dy: number; len: number; acc: number }[] = []
 let ACC = 0
@@ -54,15 +56,19 @@ function distToSegment(px: number, py: number, s: (typeof SEG)[number]): number 
   return Math.hypot(px - cx, py - cy)
 }
 
-/** Ячейки, занятые конвейером (строить нельзя) */
+/** Клетки, занятые дорогой и ртом (строить нельзя) */
 export const BLOCKED: Set<string> = (() => {
   const set = new Set<string>()
   for (let cxi = 0; cxi < COLS; cxi++) {
     for (let cyi = 0; cyi < ROWS; cyi++) {
       const px = cxi * CELL + CELL / 2
       const py = cyi * CELL + CELL / 2
+      if (Math.hypot(px - MOUTH.x, py - MOUTH.y) < MOUTH.r + 26) {
+        set.add(`${cxi},${cyi}`)
+        continue
+      }
       for (const s of SEG) {
-        if (distToSegment(px, py, s) < 28) {
+        if (distToSegment(px, py, s) < 30) {
           set.add(`${cxi},${cyi}`)
           break
         }
@@ -72,148 +78,213 @@ export const BLOCKED: Set<string> = (() => {
   return set
 })()
 
-// ---------- Станции (башни) ----------
-export const STEP_INFO: Record<StepType, { emoji: string; name: string }> = {
-  chop: { emoji: '🔪', name: 'Нарезка' },
-  fry: { emoji: '🍳', name: 'Жарка' },
-  season: { emoji: '🧂', name: 'Специи' },
-  plate: { emoji: '🍽️', name: 'Подача' },
+// ---------- Башни: здоровая еда против вредной ----------
+export const TOWERS: Record<TowerId, TowerDef> = {
+  broccoli: {
+    id: 'broccoli', name: 'Брокколи-пушка', tag: 'базовая', kind: 'shot',
+    desc: 'Стреляет зелёными горошинами. Дёшево и надёжно.',
+    cost: 50, color: '#4ade80',
+    levels: [
+      { dmg: 7, rate: 1.5, range: 100, up: 0 },
+      { dmg: 12, rate: 1.65, range: 112, up: 45 },
+      { dmg: 21, rate: 1.8, range: 124, up: 80 },
+    ],
+  },
+  carrot: {
+    id: 'carrot', name: 'Морковный снайпер', tag: 'дальний бой', kind: 'shot',
+    desc: 'Огромная дальность, мощный урон. Бьёт самых жирных.',
+    cost: 90, color: '#fb923c',
+    levels: [
+      { dmg: 26, rate: 0.55, range: 175, up: 0 },
+      { dmg: 50, rate: 0.6, range: 195, up: 85 },
+      { dmg: 92, rate: 0.66, range: 215, up: 150 },
+    ],
+  },
+  tomato: {
+    id: 'tomato', name: 'Томатный миномёт', tag: 'по площади', kind: 'lob',
+    desc: 'Навесом кидает помидор — урон по всем вокруг места падения.',
+    cost: 110, color: '#ef4444', splash: 55,
+    levels: [
+      { dmg: 13, rate: 0.62, range: 125, up: 0 },
+      { dmg: 23, rate: 0.66, range: 136, up: 90 },
+      { dmg: 40, rate: 0.7, range: 148, up: 160 },
+    ],
+  },
+  berry: {
+    id: 'berry', name: 'Ледяная смородина', tag: 'заморозка', kind: 'shot',
+    desc: 'Ледяные ягоды сильно тормозят вредную еду.',
+    cost: 80, color: '#67e8f9', slowFactor: 0.55, slowDur: 1.6,
+    levels: [
+      { dmg: 4, rate: 0.9, range: 110, up: 0 },
+      { dmg: 6, rate: 1.0, range: 122, up: 60 },
+      { dmg: 9, rate: 1.1, range: 135, up: 105 },
+    ],
+  },
+  blender: {
+    id: 'blender', name: 'Блендер', tag: 'цепная молния', kind: 'chain',
+    desc: 'Разряд тока перескакивает сразу на несколько вредностей.',
+    cost: 140, color: '#a78bfa', chains: 2,
+    levels: [
+      { dmg: 10, rate: 1.05, range: 95, up: 0 },
+      { dmg: 17, rate: 1.15, range: 106, up: 120 },
+      { dmg: 28, rate: 1.25, range: 118, up: 205 },
+    ],
+  },
+  chili: {
+    id: 'chili', name: 'Чили-огнемёт', tag: 'поджог', kind: 'flame',
+    desc: 'Обжигает всё рядом огненной струёй и поджигает надолго.',
+    cost: 120, color: '#f97316', burn: 6, burnDur: 2,
+    levels: [
+      { dmg: 24, rate: 0, range: 85, up: 0 },
+      { dmg: 40, rate: 0, range: 95, up: 100 },
+      { dmg: 64, rate: 0, range: 108, up: 175 },
+    ],
+  },
 }
 
-export const STATIONS: Record<StationType, StationDef> = {
-  chop: {
-    type: 'chop', name: 'Разделка', emoji: '🔪', cost: 50, cd: 0.9, range: 92,
-    color: '#fef3c7', border: '#f59e0b',
-    desc: 'Нарезает продукты. Быстрая, дешёвая — основа кухни.',
-  },
-  fry: {
-    type: 'fry', name: 'Плита', emoji: '🍳', cost: 70, cd: 1.05, range: 96,
-    color: '#fee2e2', border: '#ef4444',
-    desc: 'Жарит. Три лишние жарки — блюдо СГОРАЕТ!',
-  },
-  season: {
-    type: 'season', name: 'Специи', emoji: '🧂', cost: 60, cd: 1.1, range: 96,
-    color: '#f3e8ff', border: '#a855f7',
-    desc: 'Приправляет блюдо. Большой радиус действия.',
-  },
-  plate: {
-    type: 'plate', name: 'Подача', emoji: '🍽️', cost: 80, cd: 1.2, range: 90,
-    color: '#e0f2fe', border: '#0ea5e9',
-    desc: 'Собирает блюдо на тарелке перед подачей.',
-  },
-  freeze: {
-    type: 'freeze', name: 'Морозилка', emoji: '❄️', cost: 90, cd: 0, range: 110,
-    color: '#dbeafe', border: '#3b82f6',
-    desc: 'Замедляет конвейер: у поваров больше времени.',
-  },
-}
+export const TOWER_ORDER: TowerId[] = ['broccoli', 'carrot', 'tomato', 'berry', 'blender', 'chili']
 
-export const STATION_ORDER: StationType[] = ['chop', 'fry', 'season', 'plate', 'freeze']
-
-// ---------- Рецепты блюд ----------
-export const RECIPES: Record<string, RecipeDef> = {
-  fries: {
-    id: 'fries', name: 'Картошка фри', emoji: '🍟', price: 16,
-    steps: [{ type: 'fry', count: 2 }],
-  },
-  burger: {
-    id: 'burger', name: 'Гамбургер', emoji: '🍔', price: 24,
-    steps: [{ type: 'chop', count: 2 }, { type: 'fry', count: 1 }, { type: 'plate', count: 1 }],
-  },
-  salad: {
-    id: 'salad', name: 'Салат', emoji: '🥗', price: 22,
-    steps: [{ type: 'chop', count: 2 }, { type: 'season', count: 1 }, { type: 'plate', count: 1 }],
-  },
-  steak: {
-    id: 'steak', name: 'Стейк', emoji: '🥩', price: 38,
-    steps: [{ type: 'fry', count: 2 }, { type: 'season', count: 1 }, { type: 'plate', count: 1 }],
-  },
-  dessert: {
-    id: 'dessert', name: 'Десерт', emoji: '🍰', price: 34,
-    steps: [{ type: 'chop', count: 1 }, { type: 'season', count: 1 }, { type: 'plate', count: 2 }],
-  },
-  deluxe: {
-    id: 'deluxe', name: 'Пицца-де-люкс', emoji: '🍕', price: 55,
-    steps: [{ type: 'chop', count: 2 }, { type: 'fry', count: 2 }, { type: 'season', count: 2 }, { type: 'plate', count: 1 }],
-  },
+// ---------- Вредная еда ----------
+export const ENEMIES: Record<EnemyId, EnemyDef> = {
+  candy:   { name: 'Конфета',        hp: 16,   speed: 95,  bounty: 4,  armor: 0, r: 9,  tint: '#f472b6' },
+  fries:   { name: 'Картошка фри',   hp: 32,   speed: 80,  bounty: 6,  armor: 0, r: 11, tint: '#facc15' },
+  cupcake: { name: 'Кексик',         hp: 28,   speed: 90,  bounty: 5,  armor: 0, r: 10, tint: '#fbcfe8' },
+  donut:   { name: 'Пончик',         hp: 60,   speed: 62,  bounty: 8,  armor: 0, r: 13, tint: '#fda4af' },
+  cola:    { name: 'Кола',           hp: 45,   speed: 118, bounty: 9,  armor: 0, r: 11, tint: '#b45309' },
+  pizza:   { name: 'Пицца',          hp: 95,   speed: 52,  bounty: 12, armor: 3, r: 14, tint: '#fdba74' },
+  burger:  { name: 'Бургер',         hp: 170,  speed: 45,  bounty: 16, armor: 2, r: 15, tint: '#d97706' },
+  choco:   { name: 'Шоколадка',      hp: 430,  speed: 37,  bounty: 40, armor: 4, r: 17, tint: '#78350f' },
+  cake:    { name: 'ТОРТ «Мега-Губка»', hp: 1500, speed: 30, bounty: 100, armor: 6, r: 22, tint: '#f9a8d4' },
 }
 
 // ---------- Волны ----------
 export const WAVES: WaveDef[] = [
-  { name: 'Разогрев', streams: [
-    { recipeId: 'fries', count: 5, interval: 2.4, delay: 0 },
+  { name: 'Первая вредность', groups: [
+    { type: 'candy', count: 8, gap: 1.1, delay: 0 },
   ]},
-  { name: 'Первая смена', streams: [
-    { recipeId: 'fries', count: 5, interval: 2.2, delay: 0 },
-    { recipeId: 'burger', count: 3, interval: 3.4, delay: 1.5 },
+  { name: 'Сладкий ручей', groups: [
+    { type: 'candy', count: 14, gap: 0.8, delay: 0 },
   ]},
-  { name: 'Обеденный час', streams: [
-    { recipeId: 'burger', count: 5, interval: 2.4, delay: 0 },
-    { recipeId: 'salad', count: 3, interval: 3.5, delay: 1 },
+  { name: 'Картошечка', groups: [
+    { type: 'fries', count: 10, gap: 1.3, delay: 0 },
   ]},
-  { name: 'Гурманы', streams: [
-    { recipeId: 'salad', count: 5, interval: 2.3, delay: 0 },
-    { recipeId: 'steak', count: 2, interval: 4.0, delay: 2 },
+  { name: 'Вредный микс', groups: [
+    { type: 'candy', count: 10, gap: 0.7, delay: 0 },
+    { type: 'fries', count: 6, gap: 1.6, delay: 2 },
   ]},
-  { name: 'Кухня мира', streams: [
-    { recipeId: 'steak', count: 3, interval: 3.2, delay: 0 },
-    { recipeId: 'dessert', count: 3, interval: 3.4, delay: 1 },
-    { recipeId: 'burger', count: 4, interval: 2.2, delay: 0.5 },
+  { name: 'Кондитерская', groups: [
+    { type: 'cupcake', count: 10, gap: 1.0, delay: 0 },
+    { type: 'donut', count: 4, gap: 2.2, delay: 1 },
   ]},
-  { name: 'БАНКЕТ', streams: [
-    { recipeId: 'deluxe', count: 2, interval: 6.0, delay: 0 },
-    { recipeId: 'steak', count: 4, interval: 2.8, delay: 1 },
-    { recipeId: 'dessert', count: 4, interval: 2.8, delay: 2 },
-    { recipeId: 'salad', count: 5, interval: 2.2, delay: 0.5 },
-    { recipeId: 'burger', count: 5, interval: 2.0, delay: 1.5 },
+  { name: 'Шипучка', groups: [
+    { type: 'cola', count: 8, gap: 1.4, delay: 0 },
+    { type: 'candy', count: 8, gap: 0.6, delay: 0.5 },
+  ]},
+  { name: 'Пончики горкой', groups: [
+    { type: 'donut', count: 10, gap: 1.6, delay: 0 },
+    { type: 'fries', count: 6, gap: 1.2, delay: 2 },
+  ]},
+  { name: 'Пиццерия', groups: [
+    { type: 'pizza', count: 5, gap: 2.6, delay: 0 },
+    { type: 'cupcake', count: 10, gap: 0.9, delay: 1 },
+  ]},
+  { name: 'Фастфуд-фуршет', groups: [
+    { type: 'burger', count: 3, gap: 3.5, delay: 0 },
+    { type: 'donut', count: 6, gap: 1.4, delay: 1 },
+    { type: 'fries', count: 8, gap: 1.0, delay: 2 },
+  ]},
+  { name: 'Шоколадный гость', groups: [
+    { type: 'choco', count: 1, gap: 1, delay: 0 },
+    { type: 'cola', count: 10, gap: 1.2, delay: 2 },
+    { type: 'candy', count: 12, gap: 0.5, delay: 3 },
+  ]},
+  { name: 'Двойной бургер', groups: [
+    { type: 'burger', count: 5, gap: 2.8, delay: 0 },
+    { type: 'cupcake', count: 12, gap: 0.7, delay: 1 },
+  ]},
+  { name: 'Пицца-вечеринка', groups: [
+    { type: 'pizza', count: 8, gap: 2.0, delay: 0 },
+    { type: 'cola', count: 8, gap: 1.1, delay: 1.5 },
+  ]},
+  { name: 'Сахарный шторм', groups: [
+    { type: 'candy', count: 24, gap: 0.45, delay: 0 },
+    { type: 'donut', count: 6, gap: 2.0, delay: 2 },
+  ]},
+  { name: 'Вредный набор', groups: [
+    { type: 'fries', count: 12, gap: 0.9, delay: 0 },
+    { type: 'pizza', count: 5, gap: 2.4, delay: 2 },
+    { type: 'burger', count: 3, gap: 3.2, delay: 4 },
+  ]},
+  { name: 'БОСС: Торт-Мегабайт', groups: [
+    { type: 'cake', count: 1, gap: 1, delay: 0 },
+    { type: 'cupcake', count: 10, gap: 1.4, delay: 3 },
+    { type: 'cola', count: 6, gap: 1.6, delay: 5 },
+  ]},
+  { name: 'Кола-лавина', groups: [
+    { type: 'cola', count: 16, gap: 0.8, delay: 0 },
+    { type: 'burger', count: 4, gap: 3.0, delay: 2 },
+  ]},
+  { name: 'Всё сразу', groups: [
+    { type: 'candy', count: 16, gap: 0.5, delay: 0 },
+    { type: 'fries', count: 10, gap: 1.0, delay: 0 },
+    { type: 'donut', count: 8, gap: 1.5, delay: 1.5 },
+    { type: 'pizza', count: 4, gap: 2.6, delay: 3 },
+  ]},
+  { name: 'Мясной гнев', groups: [
+    { type: 'burger', count: 8, gap: 2.2, delay: 0 },
+    { type: 'pizza', count: 6, gap: 2.2, delay: 1 },
+    { type: 'cupcake', count: 14, gap: 0.6, delay: 2 },
+  ]},
+  { name: 'Шоколадный десант', groups: [
+    { type: 'choco', count: 3, gap: 8, delay: 0 },
+    { type: 'cola', count: 12, gap: 0.9, delay: 2 },
+    { type: 'candy', count: 20, gap: 0.4, delay: 3 },
+  ]},
+  { name: 'ФИНАЛ: Банкет вредности', groups: [
+    { type: 'cake', count: 1, gap: 1, delay: 0 },
+    { type: 'choco', count: 2, gap: 10, delay: 6 },
+    { type: 'burger', count: 6, gap: 2.4, delay: 2 },
+    { type: 'pizza', count: 8, gap: 2.0, delay: 3 },
+    { type: 'candy', count: 20, gap: 0.5, delay: 4 },
   ]},
 ]
 
-// ---------- Игровые константы ----------
-export const DISH_SPEED = 80        // px/сек по конвейеру
-export const FREEZE_SLOW = 0.45     // множитель скорости в морозилке
-export const BURN_LIMIT = 3         // лишних жарок до порчи блюда
-export const START_MONEY = 220
-export const START_REP = 100
-export const REP_FAIL = 12          // недоготовленное блюдо
-export const REP_SPOIL = 20         // испорчено/сгорело
-export const REP_PERFECT = 2        // идеальная подача
-export const PERFECT_BONUS = 0.25   // +25% чаевых за идеал
-export const UPGRADE_RATE = 1.4     // рост скорости станции за уровень
-export const UPG_RANGE = 1.08       // рост радиуса за уровень
-export const LEVEL_COUNT = 6
-export const LEVEL_NAME = 'Уровень 1 — Фастфуд-старт'
-export const WAVE_SKIP_BONUS = 40   // за пропуск draft-карты
+export const TOTAL_WAVES = WAVES.length
 
-export function upgradeCost(type: StationType, level: number): number {
-  const base = STATIONS[type].cost
-  return level === 1 ? Math.round(base * 0.9) : Math.round(base * 1.6)
+// ---------- Игровые константы ----------
+export const START_MONEY = 280
+export const START_TEETH = 10
+export const ENDLESS_HP_GROWTH = 1.045 // рост HP за бесконечную волну
+
+/** Множитель HP волны */
+export function waveHpMul(waveIdx: number): number {
+  if (waveIdx < TOTAL_WAVES) return 1 + waveIdx * 0.05
+  const extra = waveIdx - TOTAL_WAVES + 1
+  return 1 + (TOTAL_WAVES - 1) * 0.05 + (Math.pow(ENDLESS_HP_GROWTH, extra) - 1) * 6
+}
+
+/** Волны бесконечного режима */
+export function makeEndlessWave(n: number): WaveDef {
+  // n — номер волны (21, 22, ...)
+  const k = n - TOTAL_WAVES
+  const heavy: EnemyId[] = k % 5 === 0 ? ['cake'] : ['choco']
+  return {
+    name: `Бесконечность ${k}`,
+    groups: [
+      { type: heavy[0], count: k % 5 === 0 ? 1 + Math.floor(k / 10) : 2 + Math.floor(k / 4), gap: 7, delay: 0 },
+      { type: 'burger', count: 5 + k, gap: 1.8, delay: 1 },
+      { type: 'cola', count: 8 + k * 2, gap: 0.6, delay: 2 },
+      { type: 'pizza', count: 4 + k, gap: 1.6, delay: 3 },
+      { type: 'candy', count: 14 + k * 3, gap: 0.35, delay: 4 },
+    ],
+  }
+}
+
+export function upgradeCost(type: TowerId, level: number): number {
+  const def = TOWERS[type]
+  return level === 1 ? def.levels[1].up : def.levels[2].up
 }
 
 export function sellValue(invested: number): number {
   return Math.round(invested * 0.7)
 }
-
-// ---------- Draft-карты ----------
-export interface CardDef {
-  id: string
-  emoji: string
-  title: string
-  desc: string
-  accent: string
-  weight: number
-}
-
-export const CARDS: CardDef[] = [
-  { id: 'tips100', emoji: '💰', title: 'Щедрые чаевые', desc: '+100₽ в кассу', accent: '#f59e0b', weight: 3 },
-  { id: 'tips200', emoji: '🏦', title: 'Премия от сети', desc: '+200₽ в кассу', accent: '#f59e0b', weight: 1 },
-  { id: 'chefSpeed', emoji: '👨‍🍳', title: 'Шеф в смене', desc: 'Все станции +12% скорости (навсегда)', accent: '#ef4444', weight: 2 },
-  { id: 'chopSpeed', emoji: '🔪', title: 'Острые ножи', desc: 'Разделка +30% скорости (навсегда)', accent: '#f59e0b', weight: 2 },
-  { id: 'frySpeed', emoji: '🔥', title: 'Контроль жара', desc: 'Плиты +30% скорости (навсегда)', accent: '#ef4444', weight: 2 },
-  { id: 'seasonSpeed', emoji: '🧂', title: 'Ассортимент специй', desc: 'Специи +30% скорости (навсегда)', accent: '#a855f7', weight: 2 },
-  { id: 'plateSpeed', emoji: '🍽️', title: 'Быстрая сервировка', desc: 'Подача +30% скорости (навсегда)', accent: '#0ea5e9', weight: 2 },
-  { id: 'freezeBoost', emoji: '❄️', title: 'Суперохлаждение', desc: 'Морозилки тормозят конвейер сильнее (навсегда)', accent: '#3b82f6', weight: 2 },
-  { id: 'freeStation', emoji: '🎁', title: 'Новая станция', desc: 'Поставь любую станцию бесплатно', accent: '#22c55e', weight: 2 },
-  { id: 'rep15', emoji: '⭐', title: 'Хорошая реклама', desc: '+15 репутации ресторана', accent: '#eab308', weight: 2 },
-  { id: 'preBoost', emoji: '📦', title: 'Подготовка склада', desc: 'В следующей волне блюда стартуют с 1-м готовым шагом', accent: '#84cc16', weight: 2 },
-]

@@ -2,756 +2,552 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { GameEngine } from '@/game/engine'
-import { renderGame } from '@/game/render'
+import { renderGame, drawTowerIcon, drawEnemyIcon } from '@/game/render'
 import { Sfx } from '@/game/audio'
 import { loadSave, persistSave } from '@/game/storage'
 import {
-  W, H, CELL, STATIONS, STATION_ORDER, WAVES, RECIPES, STEP_INFO,
-  upgradeCost, sellValue, LEVEL_NAME, LEVEL_COUNT, WAVE_SKIP_BONUS,
+  W, H, CELL, TOWERS, TOWER_ORDER, ENEMIES, WAVES, TOTAL_WAVES, makeEndlessWave,
 } from '@/game/config'
-import type { HudState, SaveData, RecipeDef } from '@/game/types'
+import type { EnemyId, HudState, SaveData, TowerId } from '@/game/types'
 
-const DEFAULT_SAVE: SaveData = { sound: true, music: true, bestWave: 0, wins: 0, runs: 0, bestTips: 0, seenHowTo: false }
+const DEFAULT_SAVE: SaveData = { sound: true, bestWave: 0, wins: 0, runs: 0 }
 
 const DEFAULT_HUD: HudState = {
   phase: 'menu',
   money: 0,
-  rep: 100,
+  teeth: 10,
+  maxTeeth: 10,
   waveIdx: 0,
-  totalWaves: WAVES.length,
+  totalWaves: TOTAL_WAVES,
   alive: 0,
   remaining: 0,
   speed: 1,
   paused: false,
-  draft: [],
-  draftPicked: false,
-  selectedStationId: null,
-  selectedStation: null,
   placing: null,
-  freeStation: false,
-  stats: { perfect: 0, failed: 0, spoiled: 0, tips: 0 },
-  preBoost: false,
-  lastWaveResult: null,
-  nextWave: [],
+  selected: null,
+  waveName: '',
+  endless: false,
 }
 
-function stepsStr(r: RecipeDef): string {
-  return r.steps.map((s) => STEP_INFO[s.type].emoji + (s.count > 1 ? `×${s.count}` : '')).join(' → ')
+/* ---------- Мини-иконки на canvas ---------- */
+function TowerIcon({ id, size = 46 }: { id: TowerId; size?: number }) {
+  const ref = useRef<HTMLCanvasElement>(null)
+  useEffect(() => {
+    const ctx = ref.current?.getContext('2d')
+    if (ctx) drawTowerIcon(ctx, id, size, 0)
+  }, [id, size])
+  return <canvas ref={ref} width={size} height={size} className="shrink-0" />
 }
 
+function EnemyIcon({ id, size = 34 }: { id: EnemyId; size?: number }) {
+  const ref = useRef<HTMLCanvasElement>(null)
+  useEffect(() => {
+    const ctx = ref.current?.getContext('2d')
+    if (ctx) drawEnemyIcon(ctx, id, size, 0)
+  }, [id, size])
+  return <canvas ref={ref} width={size} height={size} className="shrink-0" />
+}
+
+/* ---------- Зубки ---------- */
+function Tooth({ filled }: { filled: boolean }) {
+  return (
+    <svg viewBox="0 0 24 28" className="w-[15px] h-[17px]" aria-hidden>
+      <path
+        d="M5 3 C1.5 3 1 6.5 2 10 C3 14 4.5 24 7 24 C9 24 8 16 12 16 C16 16 15 24 17 24 C19.5 24 21 14 22 10 C23 6.5 22.5 3 19 3 Z"
+        fill={filled ? '#ffffff' : '#57534e'}
+        stroke={filled ? '#a8a29e' : '#3f3f36'}
+        strokeWidth="1.4"
+      />
+    </svg>
+  )
+}
+
+function TeethRow({ teeth, max }: { teeth: number; max: number }) {
+  return (
+    <div className="flex items-center gap-[3px]">
+      {Array.from({ length: max }, (_, i) => (
+        <Tooth key={i} filled={i < teeth} />
+      ))}
+    </div>
+  )
+}
+
+/* ---------- Кнопка ---------- */
+function Btn({
+  children, onClick, tone = 'dark', disabled = false, title, className = '',
+}: {
+  children: React.ReactNode
+  onClick?: () => void
+  tone?: 'dark' | 'green' | 'amber' | 'red'
+  disabled?: boolean
+  title?: string
+  className?: string
+}) {
+  const tones: Record<string, string> = {
+    dark: 'bg-stone-800 hover:bg-stone-700 border-stone-600 text-stone-100',
+    green: 'bg-green-600 hover:bg-green-500 border-green-400 text-white',
+    amber: 'bg-amber-500 hover:bg-amber-400 border-amber-300 text-stone-900',
+    red: 'bg-red-700 hover:bg-red-600 border-red-400 text-white',
+  }
+  return (
+    <button
+      type="button"
+      title={title}
+      disabled={disabled}
+      onClick={onClick}
+      className={`rounded-lg border px-2.5 py-1.5 text-sm font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${tones[tone]} ${className}`}
+    >
+      {children}
+    </button>
+  )
+}
+
+/* ---------- Правила ---------- */
+function Rules({ compact = false }: { compact?: boolean }) {
+  return (
+    <div className={`text-stone-300 ${compact ? 'text-[13px]' : 'text-sm'} space-y-2`}>
+      <p>
+        <b className="text-red-400">Вредная еда</b> (сахар, фри, чипсы-пончики, кола) едет по дороге к{' '}
+        <b className="text-rose-400">огромному открытому рту</b>. Каждая вредность, попавшая внутрь, —{' '}
+        <b className="text-rose-400">минус зуб</b>. Потеряешь все 10 — кариес победил.
+      </p>
+      <p>
+        <b className="text-green-400">Башни из здоровой еды</b> стреляют по вредностям и сбивают их.
+        Выбери карточку (или клавиши <b>1–6</b>), затем кликни по свободной плитке.
+      </p>
+      <p>
+        Клик по своей башне — <b className="text-amber-400">улучшение</b> до 3 уровня или{' '}
+        <b>продажа</b> за 70%. За сбитую вредность дают <b className="text-amber-400">₽</b>.
+      </p>
+      {!compact && (
+        <>
+          <p>
+            Волна отправляется кнопкой <b className="text-green-400">▶ Волна</b> (или <b>Пробел</b>).
+            Успей построиться! Всего <b>{TOTAL_WAVES} волн</b>, дальше — бесконечный режим.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 pt-1">
+            {TOWER_ORDER.map((id, i) => (
+              <div key={id} className="flex items-center gap-2 rounded-lg bg-stone-900/70 border border-stone-700 px-2 py-1">
+                <span className="text-[10px] text-stone-500 font-mono w-3">{i + 1}</span>
+                <TowerIcon id={id} size={34} />
+                <div className="min-w-0">
+                  <div className="text-[12px] font-bold text-stone-100 leading-tight">{TOWERS[id].name}</div>
+                  <div className="text-[11px] text-stone-400 leading-tight">{TOWERS[id].desc}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-x-3 gap-y-1 pt-1 text-[11px] text-stone-400">
+            {(['candy', 'fries', 'cupcake', 'donut', 'cola', 'pizza', 'burger', 'choco', 'cake'] as EnemyId[]).map((id) => (
+              <span key={id} className="inline-flex items-center gap-1">
+                <EnemyIcon id={id} size={22} /> {ENEMIES[id].name}
+                {ENEMIES[id].armor > 0 ? ` (броня ${ENEMIES[id].armor})` : ''}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+      <p className="text-[11px] text-stone-500">
+        Горячие клавиши: <b>1–6</b> башни · <b>Пробел</b> волна · <b>U</b> улучшить · <b>X</b> продать ·{' '}
+        <b>F</b> скорость ×2 · <b>P</b> пауза · <b>Esc</b> отмена
+      </p>
+    </div>
+  )
+}
+
+/* ---------- Главный компонент ---------- */
 export default function GameShell() {
-  // Ленивая инициализация мутируемых инстансов — паттерн, одобренный react-hooks
   const engineRef = useRef<GameEngine | null>(null)
-  if (engineRef.current == null) {
-    engineRef.current = new GameEngine()
-  }
+  if (engineRef.current == null) engineRef.current = new GameEngine()
   const sfxRef = useRef<Sfx | null>(null)
-  if (sfxRef.current == null) {
-    sfxRef.current = new Sfx()
-  }
+  if (sfxRef.current == null) sfxRef.current = new Sfx()
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const wrapRef = useRef<HTMLDivElement>(null)
   const hoverRef = useRef<{ cx: number; cy: number } | null>(null)
-  const soundRef = useRef(true)
-
   const [hud, setHud] = useState<HudState>(DEFAULT_HUD)
-  // страница грузится с ssr: false — localStorage доступен при первом рендере
   const [save, setSave] = useState<SaveData>(() => loadSave())
-  const [showHowTo, setShowHowTo] = useState(false)
-  const [banner, setBanner] = useState<{ text: string; tone: 'good' | 'info' } | null>(null)
+  const [showRules, setShowRules] = useState(false)
+  const [musicOn, setMusicOn] = useState(false)
 
-  const E = () => engineRef.current as GameEngine
-
-  // ---------- Движок → React (внешние подписки) ----------
+  // синхронизация звука с состоянием
   useEffect(() => {
-    const engine = engineRef.current as GameEngine
-    const sfx = sfxRef.current as Sfx
+    sfxRef.current!.enabled = save.sound
+  }, [save.sound])
+
+  // инициализация движка и игрового цикла
+  useEffect(() => {
+    const engine = engineRef.current!
+    const sfx = sfxRef.current!
+
+    engine.sfx = (n) => sfx.play(n)
     engine.onHud = () => setHud(engine.getHud())
-    engine.sfx = (n) => {
-      if (soundRef.current) sfx.play(n)
-    }
-    engine.onBanner = (text, tone) => setBanner({ text, tone })
-    engine.onRunEnd = (win, stats, waveIdx) => {
-      setSave((s) => {
+    engine.onRunEnd = (win, waveReached) => {
+      setSave((prev) => {
         const next: SaveData = {
-          ...s,
-          runs: s.runs + 1,
-          wins: s.wins + (win ? 1 : 0),
-          bestWave: Math.max(s.bestWave, Math.min(waveIdx, LEVEL_COUNT)),
-          bestTips: Math.max(s.bestTips, stats.tips),
+          ...prev,
+          runs: prev.runs + 1,
+          wins: prev.wins + (win ? 1 : 0),
+          bestWave: Math.max(prev.bestWave, win ? TOTAL_WAVES : waveReached),
         }
         persistSave(next)
         return next
       })
     }
-    soundRef.current = loadSave().sound
-    sfx.enabled = soundRef.current
-    // музыка стартует после первого клика (политика автоплея браузеров)
-    const startMusicOnce = () => {
-      if (loadSave().music) sfx.setMusic(true)
-      window.removeEventListener('pointerdown', startMusicOnce)
-    }
-    window.addEventListener('pointerdown', startMusicOnce)
-    // отладочный хук для автотестов и балансировки
-    ;(window as unknown as { __engine: GameEngine }).__engine = engine
-  }, [])
 
-  // ---------- Игровой цикл ----------
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-    const engine = engineRef.current as GameEngine
+    const canvas = canvasRef.current!
+    const ctx = canvas.getContext('2d')!
     let raf = 0
     let last = performance.now()
-    const loop = (ts: number) => {
-      const dt = Math.min(0.06, (ts - last) / 1000)
-      last = ts
+    const loop = (now: number) => {
+      const dt = Math.min(0.1, (now - last) / 1000)
+      last = now
       engine.update(dt)
-      renderGame(ctx, engine, { hover: hoverRef.current, timeMs: ts })
+      renderGame(ctx, engine, { hover: hoverRef.current, timeMs: now })
       raf = requestAnimationFrame(loop)
     }
     raf = requestAnimationFrame(loop)
     return () => cancelAnimationFrame(raf)
   }, [])
 
-  // ---------- Масштабирование canvas ----------
-  useEffect(() => {
-    const resize = () => {
-      const canvas = canvasRef.current
-      const wrap = wrapRef.current
-      if (!canvas || !wrap) return
-      const cw = wrap.clientWidth
-      const ch = wrap.clientHeight
-      const scale = Math.min(cw / W, ch / H)
-      const dpr = Math.min(2, window.devicePixelRatio || 1)
-      canvas.style.width = `${Math.floor(W * scale)}px`
-      canvas.style.height = `${Math.floor(H * scale)}px`
-      canvas.width = Math.max(1, Math.floor(W * scale * dpr))
-      canvas.height = Math.max(1, Math.floor(H * scale * dpr))
-      const c = canvas.getContext('2d')
-      if (c) c.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0)
-    }
-    resize()
-    window.addEventListener('resize', resize)
-    window.addEventListener('orientationchange', resize)
-    return () => {
-      window.removeEventListener('resize', resize)
-      window.removeEventListener('orientationchange', resize)
-    }
-  }, [])
-
-  // ---------- Service Worker (только production: в dev чанки без хешей) ----------
-  useEffect(() => {
-    if (process.env.NODE_ENV === 'production' && 'serviceWorker' in navigator && window.isSecureContext) {
-      navigator.serviceWorker.register('/sw.js').catch(() => {})
-    }
-  }, [])
-
-  // ---------- Баннер исчезает сам ----------
-  useEffect(() => {
-    if (!banner) return
-    const t = setTimeout(() => setBanner(null), 2400)
-    return () => clearTimeout(t)
-  }, [banner])
-
-  // ---------- Пауза при сворачивании ----------
-  useEffect(() => {
-    const onVis = () => {
-      const engine = engineRef.current as GameEngine
-      if (document.hidden && engine.phase === 'wave') engine.setPaused(true)
-    }
-    document.addEventListener('visibilitychange', onVis)
-    return () => document.removeEventListener('visibilitychange', onVis)
-  }, [])
-
-  // ---------- Клавиатура ----------
+  // горячие клавиши
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const engine = engineRef.current as GameEngine
+      const engine = engineRef.current!
+      if (e.repeat) return
       if (e.key === 'Escape') {
-        engine.cancelPlacing()
-        engine.selectStation(null)
-      } else if (e.code === 'Space' && engine.phase === 'wave') {
-        e.preventDefault()
-        engine.togglePause()
-      } else if (e.key >= '1' && e.key <= '5') {
-        const t = STATION_ORDER[Number(e.key) - 1]
-        if (t) engine.beginPlacing(t)
+        if (showRules) setShowRules(false)
+        else engine.cancelPlacing()
+        return
       }
+      if (e.code === 'Space') {
+        e.preventDefault()
+        engine.startWave()
+        return
+      }
+      const k = e.key.toLowerCase()
+      const idx = Number(e.key)
+      if (idx >= 1 && idx <= TOWER_ORDER.length) engine.beginPlacing(TOWER_ORDER[idx - 1])
+      else if (k === 'u' || k === 'у') engine.upgradeSelected()
+      else if (k === 'x' || k === 'ч') engine.sellSelected()
+      else if (k === 'f' || k === 'а') engine.toggleSpeed()
+      else if (k === 'p' || k === 'з') engine.togglePause()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [showRules])
 
-  // ---------- Ввод на canvas ----------
-  const toCell = (clientX: number, clientY: number) => {
-    const canvas = canvasRef.current
-    if (!canvas) return null
+  // указатель мыши / пальца
+  const cellFromEvent = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current!
     const rect = canvas.getBoundingClientRect()
-    const x = (clientX - rect.left) * (W / rect.width)
-    const y = (clientY - rect.top) * (H / rect.height)
-    return { x, y, cx: Math.floor(x / CELL), cy: Math.floor(y / CELL) }
+    const x = ((e.clientX - rect.left) / rect.width) * W
+    const y = ((e.clientY - rect.top) / rect.height) * H
+    return { cx: Math.floor(x / CELL), cy: Math.floor(y / CELL) }
   }
 
-  const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    const p = toCell(e.clientX, e.clientY)
-    const engine = E()
-    if (!p) return
-    if (engine.placing) {
-      engine.tryPlace(p.cx, p.cy)
-      return
-    }
-    let hit: number | null = null
-    for (const st of engine.stations) {
-      if (Math.hypot(st.x - p.x, st.y - p.y) <= 38) {
-        hit = st.id
-        break
-      }
-    }
-    engine.selectStation(hit)
-  }
-
-  const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    const p = toCell(e.clientX, e.clientY)
-    if (p) hoverRef.current = { cx: p.cx, cy: p.cy }
-  }
-
-  const onPointerLeave = () => {
-    hoverRef.current = null
-  }
-
-  // ---------- Действия ----------
-  const startRun = () => {
-    E().startRun()
-    if (!save.seenHowTo) {
-      setShowHowTo(true)
-      setSave((s) => {
-        const next = { ...s, seenHowTo: true }
-        persistSave(next)
-        return next
-      })
-    }
-  }
+  const engine = engineRef.current!
+  const sfx = sfxRef.current!
 
   const toggleSound = () => {
-    const sfx = sfxRef.current as Sfx
-    setSave((s) => {
-      const next = { ...s, sound: !s.sound }
-      soundRef.current = next.sound
-      sfx.enabled = next.sound
+    setSave((prev) => {
+      const next = { ...prev, sound: !prev.sound }
       persistSave(next)
       return next
     })
   }
 
   const toggleMusic = () => {
-    const sfx = sfxRef.current as Sfx
-    setSave((s) => {
-      const next = { ...s, music: !s.music }
-      sfx.setMusic(next.music)
-      persistSave(next)
-      return next
-    })
+    const on = !musicOn
+    setMusicOn(on)
+    sfx.setMusic(on)
   }
 
-  // ---------- Выбранная станция (данные из HUD-снапшота) ----------
-  const selected = hud.selectedStation
+  const startGame = () => {
+    engine.startRun()
+    const w = Number(new URLSearchParams(window.location.search).get('wave'))
+    if (w >= 1) engine.debugJump(w)
+    sfx.play('click')
+  }
 
-  const gameActive = hud.phase === 'build' || hud.phase === 'wave' || hud.phase === 'draft'
-  const stars = Math.ceil(hud.rep / 20)
+  // состав следующей волны (для превью)
+  const nextWave = hud.waveIdx < TOTAL_WAVES ? WAVES[hud.waveIdx] : makeEndlessWave(hud.waveIdx + 1)
+  const waveComp = new Map<EnemyId, number>()
+  for (const g of nextWave.groups) waveComp.set(g.type, (waveComp.get(g.type) ?? 0) + g.count)
+
+  const inGame = hud.phase !== 'menu'
 
   return (
-    <div
-      ref={wrapRef}
-      className="fixed inset-0 flex select-none items-center justify-center overflow-hidden bg-stone-950"
-      onContextMenu={(e) => e.preventDefault()}
-    >
-      <div className="relative shadow-2xl">
-        <canvas
-          ref={canvasRef}
-          className="block touch-none"
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerLeave={onPointerLeave}
-        />
+    <div className="min-h-screen w-full bg-stone-950 bg-[radial-gradient(ellipse_at_top,#292524_0%,#0c0a09_70%)] flex flex-col items-center px-2 py-3 gap-2 select-none">
+      {/* ---------- Верхняя панель ---------- */}
+      <header className="w-full max-w-[1200px] flex flex-wrap items-center gap-x-3 gap-y-1.5">
+        <div className="font-black tracking-tight text-lg text-green-400 flex items-center gap-1.5">
+          <span className="text-2xl">🥦</span>
+          <span>
+            FOODSTORATOR <span className="text-stone-400 font-bold">TD</span>
+          </span>
+        </div>
 
-        {/* ---------- ВЕРХНЯЯ ПАНЕЛЬ ---------- */}
-        {gameActive && (
-          <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-1 p-1.5 sm:p-2">
-            <div className="flex items-center gap-1.5 sm:gap-2">
-              <div className="rounded-lg bg-stone-900/85 px-2 py-1 text-xs font-bold text-amber-300 shadow sm:px-2.5 sm:text-sm">
-                💰 {hud.money}₽
+        {inGame && (
+          <div className="flex flex-wrap items-center gap-1.5 ml-auto">
+            <div className="rounded-full bg-stone-900/90 border border-amber-500/40 px-3 py-1 text-amber-300 font-bold text-sm" title="Монеты">
+              ₽ {hud.money}
+            </div>
+            <div className="rounded-full bg-stone-900/90 border border-rose-500/40 px-3 py-1 flex items-center" title="Зубы рта">
+              <TeethRow teeth={hud.teeth} max={hud.maxTeeth} />
+            </div>
+            <div className="rounded-full bg-stone-900/90 border border-stone-600 px-3 py-1 text-stone-200 text-sm font-bold">
+              {hud.endless ? `∞ волна ${hud.waveIdx + 1}` : `Волна ${Math.min(hud.waveIdx + 1, TOTAL_WAVES)}/${TOTAL_WAVES}`}
+              <span className="hidden sm:inline text-stone-400 font-semibold"> — {hud.waveName}</span>
+            </div>
+            {hud.phase === 'wave' && (
+              <div className="rounded-full bg-stone-900/90 border border-red-500/40 px-3 py-1 text-red-300 text-xs font-bold">
+                врагов: {hud.remaining}
               </div>
-              <div className="flex items-center gap-1.5 rounded-lg bg-stone-900/85 px-2 py-1 shadow sm:px-2.5">
-                <span className="text-xs sm:text-sm">⭐</span>
-                <div className="h-2.5 w-14 overflow-hidden rounded-full bg-stone-700 sm:w-24">
-                  <div
-                    className={`h-full rounded-full transition-all ${hud.rep > 60 ? 'bg-green-500' : hud.rep > 30 ? 'bg-amber-500' : 'bg-red-500'}`}
-                    style={{ width: `${hud.rep}%` }}
-                  />
-                </div>
-                <span className="text-[10px] font-bold text-white sm:text-xs">{hud.rep}</span>
-              </div>
-            </div>
-
-            <div className="rounded-lg bg-stone-900/85 px-2.5 py-1 text-xs font-bold text-white shadow sm:text-sm">
-              Волна {Math.min(hud.waveIdx + 1, hud.totalWaves)}/{hud.totalWaves} · 🧾 {hud.remaining}
-            </div>
-
-            <div className="pointer-events-auto flex items-center gap-1 sm:gap-1.5">
-              {hud.phase === 'wave' && (
-                <>
-                  <button
-                    aria-label="Скорость"
-                    onClick={() => E().toggleSpeed()}
-                    className="h-8 w-8 rounded-lg bg-stone-900/85 text-xs font-bold text-white shadow transition hover:bg-stone-800 active:scale-95 sm:h-9 sm:w-9 sm:text-sm"
-                  >
-                    ×{hud.speed}
-                  </button>
-                  <button
-                    aria-label="Пауза"
-                    onClick={() => E().togglePause()}
-                    className="h-8 w-8 rounded-lg bg-stone-900/85 text-sm text-white shadow transition hover:bg-stone-800 active:scale-95 sm:h-9 sm:w-9"
-                  >
-                    {hud.paused ? '▶️' : '⏸️'}
-                  </button>
-                </>
-              )}
-              <button
-                aria-label="Звук"
-                onClick={toggleSound}
-                className="h-8 w-8 rounded-lg bg-stone-900/85 text-sm text-white shadow transition hover:bg-stone-800 active:scale-95 sm:h-9 sm:w-9"
-              >
-                {save.sound ? '🔊' : '🔇'}
-              </button>
-              <button
-                aria-label="Музыка"
-                onClick={toggleMusic}
-                className="h-8 w-8 rounded-lg bg-stone-900/85 text-sm text-white shadow transition hover:bg-stone-800 active:scale-95 sm:h-9 sm:w-9"
-              >
-                <span className={save.music ? '' : 'opacity-40'}>🎵</span>
-              </button>
-              <button
-                aria-label="Как играть"
-                onClick={() => setShowHowTo(true)}
-                className="h-8 w-8 rounded-lg bg-stone-900/85 text-sm text-white shadow transition hover:bg-stone-800 active:scale-95 sm:h-9 sm:w-9"
-              >
-                ❓
-              </button>
-            </div>
+            )}
+            <Btn onClick={() => engine.toggleSpeed()} title="Скорость игры (F)">
+              {hud.speed}×
+            </Btn>
+            <Btn onClick={() => engine.togglePause()} disabled={hud.phase !== 'wave'} title="Пауза (P)">
+              {hud.paused ? '▶' : '⏸'}
+            </Btn>
+            <Btn onClick={toggleSound} title="Звук">
+              {save.sound ? '🔊' : '🔇'}
+            </Btn>
+            <Btn onClick={toggleMusic} tone={musicOn ? 'green' : 'dark'} title="Музыка">
+              ♪
+            </Btn>
+            <Btn onClick={() => setShowRules(true)} title="Правила">
+              ?
+            </Btn>
+            <Btn onClick={startGame} tone="red" title="Начать заново">
+              ↺
+            </Btn>
           </div>
         )}
+        {!inGame && save.bestWave > 0 && (
+          <div className="ml-auto text-xs text-stone-400">
+            Рекорд: волна <b className="text-amber-300">{save.bestWave}</b> · побед: <b className="text-green-300">{save.wins}</b>
+          </div>
+        )}
+      </header>
 
-        {/* ---------- БАННЕР ---------- */}
-        {banner && gameActive && (
-          <div className="pointer-events-none absolute inset-x-0 top-12 flex justify-center sm:top-14">
+      {/* ---------- Игровое поле + магазин ---------- */}
+      <div className="w-full max-w-[1200px] flex flex-col lg:flex-row gap-2.5 items-stretch">
+        {/* Поле */}
+        <div className="relative flex-1 min-w-0">
+          <canvas
+            ref={canvasRef}
+            width={W}
+            height={H}
+            className="w-full h-auto rounded-xl border-2 border-stone-700 shadow-[0_10px_40px_rgba(0,0,0,0.6)] touch-none"
+            style={{ cursor: hud.placing ? 'crosshair' : 'pointer' }}
+            onPointerDown={(e) => {
+              const { cx, cy } = cellFromEvent(e)
+              engine.canvasClick(cx, cy)
+            }}
+            onPointerMove={(e) => {
+              hoverRef.current = cellFromEvent(e)
+            }}
+            onPointerLeave={() => {
+              hoverRef.current = null
+            }}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              engine.cancelPlacing()
+            }}
+          />
+
+          {/* Кнопка старта волны */}
+          {hud.phase === 'build' && (
+            <div className="absolute inset-x-0 bottom-3 flex justify-center pointer-events-none">
+              <Btn tone="green" className="pointer-events-auto text-base px-5 py-2 animate-pulse shadow-lg" onClick={() => engine.startWave()}>
+                ▶ Волна {hud.waveIdx + 1}
+              </Btn>
+            </div>
+          )}
+
+          {/* Пауза */}
+          {hud.paused && hud.phase === 'wave' && (
+            <div className="absolute inset-0 bg-stone-950/70 rounded-xl flex flex-col items-center justify-center gap-3">
+              <div className="text-3xl font-black text-stone-100">Пауза</div>
+              <Btn tone="green" onClick={() => engine.togglePause()}>Продолжить</Btn>
+            </div>
+          )}
+
+          {/* Меню */}
+          {hud.phase === 'menu' && (
+            <div className="absolute inset-0 bg-stone-950/88 rounded-xl flex flex-col items-center justify-center p-4 overflow-auto">
+              <div className="text-5xl sm:text-6xl mb-1">🥦⚔️🍬</div>
+              <h1 className="text-3xl sm:text-4xl font-black text-green-400 tracking-tight text-center">
+                FOODSTORATOR TD
+              </h1>
+              <p className="text-stone-300 text-center mt-1 mb-3 max-w-md text-sm sm:text-base">
+                Вредная еда лезет в огромный рот. Расставь здоровую еду-башни
+                и не дай кариесу выбить все зубы!
+              </p>
+              <div className="flex items-center gap-2">
+                <Btn tone="green" className="text-lg px-6 py-2.5" onClick={startGame}>
+                  ▶ Играть
+                </Btn>
+                <Btn onClick={() => setShowRules(true)}>Как играть</Btn>
+              </div>
+              <div className="mt-4 max-w-lg w-full rounded-xl bg-stone-900/80 border border-stone-700 p-3">
+                <Rules compact />
+              </div>
+              {save.bestWave > 0 && (
+                <div className="mt-2 text-xs text-stone-400">
+                  Рекорд: волна <b className="text-amber-300">{save.bestWave}</b> · побед:{' '}
+                  <b className="text-green-300">{save.wins}</b> · попыток: {save.runs}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Гейм-овер */}
+          {hud.phase === 'gameover' && (
+            <div className="absolute inset-0 bg-stone-950/88 rounded-xl flex flex-col items-center justify-center p-4 text-center">
+              <div className="text-5xl mb-2">🦷💥</div>
+              <h2 className="text-3xl font-black text-red-400">КАРИЕС ПОБЕДИЛ!</h2>
+              <p className="text-stone-300 mt-1 mb-3 text-sm">
+                Вредная еда дошла до рта на волне <b className="text-amber-300">{hud.waveIdx + 1}</b>.
+                Зубов осталось: <b className="text-rose-300">{hud.teeth}</b>.
+              </p>
+              <div className="flex gap-2">
+                <Btn tone="green" onClick={startGame}>Заново</Btn>
+                <Btn onClick={() => engine.openMenu()}>В меню</Btn>
+              </div>
+            </div>
+          )}
+
+          {/* Победа */}
+          {hud.phase === 'victory' && (
+            <div className="absolute inset-0 bg-stone-950/88 rounded-xl flex flex-col items-center justify-center p-4 text-center">
+              <div className="text-5xl mb-2">🥗🏆</div>
+              <h2 className="text-3xl font-black text-green-400">ЖЕЛУДОК СПАСЁН!</h2>
+              <p className="text-stone-300 mt-1 mb-3 text-sm">
+                Все {TOTAL_WAVES} волн вредной еды отбиты. Рот цел, зубы на месте!
+              </p>
+              <div className="flex flex-wrap justify-center gap-2">
+                <Btn tone="green" onClick={() => engine.continueEndless()}>∞ Бесконечный режим</Btn>
+                <Btn tone="amber" onClick={startGame}>Заново</Btn>
+                <Btn onClick={() => engine.openMenu()}>В меню</Btn>
+              </div>
+            </div>
+          )}
+
+          {/* Правила */}
+          {showRules && (
             <div
-              className={`rounded-full px-4 py-1.5 text-sm font-bold text-white shadow-lg ${banner.tone === 'good' ? 'bg-green-600' : 'bg-stone-900/90'}`}
+              className="absolute inset-0 bg-stone-950/90 rounded-xl p-4 overflow-auto"
+              onClick={(e) => {
+                if (e.target === e.currentTarget) setShowRules(false)
+              }}
             >
-              {banner.text}
-            </div>
-          </div>
-        )}
-
-        {/* ---------- ПОДСКАЗКА БЕСПЛАТНОЙ СТАНЦИИ ---------- */}
-        {hud.freeStation && (
-          <div className="pointer-events-none absolute inset-x-0 top-24 flex justify-center">
-            <div className="animate-pulse rounded-full bg-green-600 px-4 py-1.5 text-xs font-bold text-white shadow-lg sm:text-sm">
-              🎁 Выбери станцию внизу и поставь бесплатно
-            </div>
-          </div>
-        )}
-
-        {/* ---------- КНОПКА СТАРТА ВОЛНЫ + ПРЕВЬЮ ---------- */}
-        {hud.phase === 'build' && (
-          <div className="pointer-events-none absolute inset-x-0 bottom-16 flex flex-col items-center gap-1 sm:bottom-[76px]">
-            {hud.waveIdx === 0 && !hud.freeStation && (
-              <div className="rounded-full bg-stone-900/85 px-3 py-1 text-[11px] font-semibold text-amber-200 shadow sm:text-xs">
-                Построй станции у конвейера 🔪🍳 — потом стартуй
-              </div>
-            )}
-            {hud.nextWave.length > 0 && (
-              <div className="flex max-w-[95%] flex-wrap items-center justify-center gap-1 rounded-xl bg-stone-900/85 px-2.5 py-1.5 shadow">
-                <span className="text-[10px] font-bold text-stone-300 sm:text-xs">Идут:</span>
-                {hud.nextWave.map((n) => (
-                  <span key={n.emoji} className="rounded-md bg-stone-800 px-1.5 py-0.5 text-[11px] sm:text-sm">
-                    {n.emoji}×{n.count} <span className="text-stone-400">{n.steps}</span>
-                  </span>
-                ))}
-              </div>
-            )}
-            <button
-              onClick={() => E().startWave()}
-              className="pointer-events-auto rounded-xl bg-green-600 px-6 py-2.5 text-base font-extrabold text-white shadow-xl transition hover:bg-green-500 active:scale-95 sm:text-lg"
-            >
-              ▶ Старт волны {hud.waveIdx + 1}
-            </button>
-          </div>
-        )}
-
-        {/* ---------- ПАНЕЛЬ СТАНЦИИ ---------- */}
-        {selected && (
-          <div className="absolute bottom-16 right-1.5 w-44 rounded-xl bg-stone-900/95 p-2.5 shadow-xl sm:bottom-[76px] sm:right-2 sm:w-52 sm:p-3">
-            <div className="mb-1 flex items-center justify-between">
-              <div className="text-sm font-bold text-white">
-                {STATIONS[selected.type].emoji} {STATIONS[selected.type].name}
-              </div>
-              <div className="flex gap-0.5">
-                {[1, 2, 3].map((i) => (
-                  <span key={i} className={`h-1.5 w-3 rounded-full ${i <= selected.level ? 'bg-amber-400' : 'bg-stone-700'}`} />
-                ))}
-              </div>
-            </div>
-            <div className="mb-2 text-[10px] leading-snug text-stone-400 sm:text-[11px]">
-              {STATIONS[selected.type].desc}
-            </div>
-            <div className="flex gap-1.5">
-              {selected.level < 3 ? (
-                <button
-                  onClick={() => E().upgradeStation(selected.id)}
-                  disabled={hud.money < upgradeCost(selected.type, selected.level)}
-                  className="flex-1 rounded-lg bg-amber-500 px-1.5 py-1.5 text-[11px] font-bold text-white shadow transition enabled:hover:bg-amber-400 disabled:opacity-40 sm:text-xs"
-                >
-                  ⬆ {upgradeCost(selected.type, selected.level)}₽
-                </button>
-              ) : (
-                <div className="flex-1 rounded-lg bg-stone-800 px-1.5 py-1.5 text-center text-[11px] font-bold text-amber-300 sm:text-xs">
-                  МАКС
+              <div className="max-w-xl mx-auto rounded-xl bg-stone-900 border border-stone-700 p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-lg font-black text-green-400">Как играть</h3>
+                  <Btn onClick={() => setShowRules(false)}>✕</Btn>
                 </div>
-              )}
-              <button
-                onClick={() => E().sellStation(selected.id)}
-                className="flex-1 rounded-lg bg-red-600/80 px-1.5 py-1.5 text-[11px] font-bold text-white shadow transition hover:bg-red-500 sm:text-xs"
-              >
-                🗑 +{sellValue(selected.invested)}₽
-              </button>
-              <button
-                aria-label="Закрыть"
-                onClick={() => E().selectStation(null)}
-                className="rounded-lg bg-stone-700 px-2 py-1.5 text-[11px] font-bold text-white transition hover:bg-stone-600"
-              >
-                ✕
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* ---------- НИЖНЯЯ ПАНЕЛЬ (МАГАЗИН) ---------- */}
-        {gameActive && (
-          <div className="pointer-events-auto absolute inset-x-0 bottom-0 flex items-end justify-center gap-1 bg-gradient-to-t from-stone-950/90 to-transparent p-1.5 sm:gap-1.5 sm:p-2">
-            {STATION_ORDER.map((t, i) => {
-              const def = STATIONS[t]
-              const afford = hud.freeStation || hud.money >= def.cost
-              const active = hud.placing === t
-              return (
-                <button
-                  key={t}
-                  aria-label={`Построить: ${def.name}`}
-                  onClick={() => E().beginPlacing(t)}
-                  disabled={!afford}
-                  className={`flex min-w-[62px] flex-col items-center rounded-xl border-2 px-1.5 py-1 shadow-lg transition active:scale-95 sm:min-w-[76px] sm:px-2 sm:py-1.5 ${
-                    active ? 'border-amber-400 bg-amber-500/90' : 'border-stone-700 bg-stone-900/90'
-                  } ${afford ? '' : 'opacity-40'}`}
-                >
-                  <span className="text-xl sm:text-2xl">{def.emoji}</span>
-                  <span className="text-[9px] font-bold leading-tight text-white sm:text-[11px]">{def.name}</span>
-                  <span className={`text-[9px] font-bold leading-tight sm:text-[10px] ${active ? 'text-white' : 'text-amber-300'}`}>
-                    {hud.freeStation ? 'бесплатно' : `${def.cost}₽`}
-                  </span>
-                  <span className="text-[8px] leading-none text-stone-400">{i + 1}</span>
-                </button>
-              )
-            })}
-            {(hud.placing || hud.freeStation) && (
-              <button
-                onClick={() => E().cancelPlacing()}
-                className="ml-1 h-[52px] rounded-xl border-2 border-red-500/60 bg-red-600/80 px-2 text-xs font-bold text-white shadow-lg transition hover:bg-red-500 sm:h-[60px] sm:px-3"
-              >
-                ✕<br />отмена
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* ---------- ПАУЗА ---------- */}
-        {hud.paused && hud.phase === 'wave' && (
-          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-black/70">
-            <div className="text-3xl font-black text-white">⏸️ Пауза</div>
-            <div className="flex flex-col gap-2">
-              <button
-                onClick={() => E().setPaused(false)}
-                className="w-52 rounded-xl bg-green-600 px-4 py-2.5 font-bold text-white shadow-lg transition hover:bg-green-500"
-              >
-                ▶ Продолжить
-              </button>
-              <button
-                onClick={() => { E().setPaused(false); E().startRun() }}
-                className="w-52 rounded-xl bg-amber-600 px-4 py-2.5 font-bold text-white shadow-lg transition hover:bg-amber-500"
-              >
-                🔄 Заново
-              </button>
-              <button
-                onClick={() => setShowHowTo(true)}
-                className="w-52 rounded-xl bg-sky-700 px-4 py-2.5 font-bold text-white shadow-lg transition hover:bg-sky-600"
-              >
-                📖 Правила
-              </button>
-              <button
-                onClick={() => { E().setPaused(false); E().openMenu() }}
-                className="w-52 rounded-xl bg-stone-700 px-4 py-2.5 font-bold text-white shadow-lg transition hover:bg-stone-600"
-              >
-                🏠 В меню
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* ---------- DRAFT ---------- */}
-        {hud.phase === 'draft' && (
-          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/70 p-2">
-            <div className="w-full max-w-2xl rounded-2xl bg-stone-900 p-3 shadow-2xl sm:p-5">
-              <div className="mb-1 text-center text-lg font-black text-white sm:text-2xl">
-                🃏 Волна {hud.waveIdx} пройдена! Выбери буст
-              </div>
-              <div className="mb-3 text-center text-[11px] text-stone-400 sm:text-sm">
-                Следующая: «{WAVES[hud.waveIdx]?.name}»
-              </div>
-              <div className="mb-3 grid grid-cols-3 gap-2 sm:gap-3">
-                {hud.draft.map((c) => (
-                  <button
-                    key={c.id}
-                    onClick={() => E().pickDraft(c.id)}
-                    className="flex flex-col items-center gap-1 rounded-xl border-2 border-stone-700 bg-stone-800 px-2 py-3 text-center shadow-lg transition hover:-translate-y-0.5 hover:border-stone-500 active:scale-95"
-                    style={{ borderTopColor: c.accent, borderTopWidth: 4 }}
-                  >
-                    <span className="text-3xl sm:text-4xl">{c.emoji}</span>
-                    <span className="text-xs font-bold leading-tight text-white sm:text-sm">{c.title}</span>
-                    <span className="text-[9px] leading-tight text-stone-400 sm:text-[11px]">{c.desc}</span>
-                  </button>
-                ))}
-              </div>
-              <div className="flex justify-center">
-                <button
-                  onClick={() => E().skipDraft()}
-                  className="rounded-lg bg-stone-700 px-4 py-2 text-xs font-bold text-white transition hover:bg-stone-600 sm:text-sm"
-                >
-                  Пропустить (+{WAVE_SKIP_BONUS}₽)
-                </button>
+                <Rules />
               </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
 
-        {/* ---------- КОНЕЦ ИГРЫ ---------- */}
-        {(hud.phase === 'gameover' || hud.phase === 'victory') && (
-          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/80 p-2">
-            <div className="w-full max-w-md rounded-2xl bg-stone-900 p-4 text-center shadow-2xl sm:p-6">
-              <div className="text-4xl sm:text-5xl">{hud.phase === 'victory' ? '🎉' : '😖'}</div>
-              <div className={`mt-1 text-2xl font-black sm:text-3xl ${hud.phase === 'victory' ? 'text-green-400' : 'text-red-400'}`}>
-                {hud.phase === 'victory' ? 'Смена пройдена!' : 'Ресторан закрыт'}
-              </div>
-              <div className="mt-1 text-xs text-stone-400 sm:text-sm">{LEVEL_NAME}</div>
-              {hud.phase === 'victory' && (
-                <div className="mt-2 text-2xl tracking-widest">{'⭐'.repeat(Math.max(1, stars))}</div>
-              )}
-              <div className="mt-3 grid grid-cols-2 gap-1.5 text-left text-xs sm:gap-2 sm:text-sm">
-                <div className="rounded-lg bg-stone-800 px-2.5 py-1.5 text-white">💰 Чаевые: <b className="text-amber-300">{hud.stats.tips}₽</b></div>
-                <div className="rounded-lg bg-stone-800 px-2.5 py-1.5 text-white">🌊 Волн: <b>{hud.waveIdx}/{hud.totalWaves}</b></div>
-                <div className="rounded-lg bg-stone-800 px-2.5 py-1.5 text-white">✅ Идеально: <b className="text-green-400">{hud.stats.perfect}</b></div>
-                <div className="rounded-lg bg-stone-800 px-2.5 py-1.5 text-white">❌ Провалы: <b className="text-orange-400">{hud.stats.failed}</b></div>
-                <div className="rounded-lg bg-stone-800 px-2.5 py-1.5 text-white">🔥 Испорчено: <b className="text-red-400">{hud.stats.spoiled}</b></div>
-                <div className="rounded-lg bg-stone-800 px-2.5 py-1.5 text-white">⭐ Репутация: <b>{hud.rep}</b></div>
-              </div>
-              <div className="mt-4 flex justify-center gap-2">
-                <button
-                  onClick={() => E().startRun()}
-                  className="rounded-xl bg-green-600 px-5 py-2.5 font-bold text-white shadow-lg transition hover:bg-green-500"
-                >
-                  🔄 Ещё смена
-                </button>
-                <button
-                  onClick={() => E().openMenu()}
-                  className="rounded-xl bg-stone-700 px-5 py-2.5 font-bold text-white shadow-lg transition hover:bg-stone-600"
-                >
-                  🏠 В меню
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ---------- МЕНЮ ---------- */}
-        {hud.phase === 'menu' && (
-          <div className="absolute inset-0 z-20 flex items-center justify-center bg-stone-950/85 p-2">
-            <div className="max-h-full w-full max-w-lg overflow-y-auto rounded-2xl bg-stone-900/95 p-4 shadow-2xl sm:p-6">
-              <div className="text-center">
-                <img src="/logo.svg" alt="FOODSTORATOR" className="mx-auto h-24 w-24 drop-shadow-lg sm:h-28 sm:w-28" />
-                <h1 className="mt-1 bg-gradient-to-r from-amber-300 via-orange-400 to-red-400 bg-clip-text text-3xl font-black tracking-tight text-transparent sm:text-4xl">
-                  ШЕФ-КОНВЕЙЕР
-                </h1>
-                <p className="mt-1 text-xs text-stone-400 sm:text-sm">
-                  Тауэр-дефенс на кухне: блюда едут конвейером, а ты готовишь их станциями-поварами
-                </p>
-              </div>
-
-              <div className="mt-3 flex flex-col gap-2">
-                <button
-                  onClick={startRun}
-                  className="rounded-xl bg-green-600 px-4 py-3 text-lg font-extrabold text-white shadow-lg transition hover:bg-green-500 active:scale-95"
-                >
-                  ▶ Начать смену
-                </button>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => setShowHowTo(true)}
-                    className="flex-1 rounded-xl bg-stone-700 px-4 py-2.5 font-bold text-white shadow transition hover:bg-stone-600"
-                  >
-                    📖 Как играть
-                  </button>
-                  <button
-                    onClick={toggleSound}
-                    className="rounded-xl bg-stone-700 px-4 py-2.5 font-bold text-white shadow transition hover:bg-stone-600"
-                  >
-                    {save.sound ? '🔊' : '🔇'}
-                  </button>
-                  <button
-                    onClick={toggleMusic}
-                    className="rounded-xl bg-stone-700 px-4 py-2.5 font-bold text-white shadow transition hover:bg-stone-600"
-                  >
-                    <span className={save.music ? '' : 'opacity-40'}>🎵</span>
-                  </button>
-                </div>
-              </div>
-
-              {save.runs > 0 && (
-                <div className="mt-3 grid grid-cols-3 gap-1.5 text-center text-[11px] sm:text-xs">
-                  <div className="rounded-lg bg-stone-800 px-2 py-1.5 text-white">🏆 Волн: <b className="text-amber-300">{save.bestWave}</b></div>
-                  <div className="rounded-lg bg-stone-800 px-2 py-1.5 text-white">🎉 Побед: <b className="text-green-400">{save.wins}</b></div>
-                  <div className="rounded-lg bg-stone-800 px-2 py-1.5 text-white">💰 Рекорд: <b className="text-amber-300">{save.bestTips}₽</b></div>
-                </div>
-              )}
-
-              <div className="mt-3 rounded-xl bg-stone-800/60 p-2.5">
-                <div className="text-[11px] font-bold text-stone-300 sm:text-xs">📱 Установка на устройство:</div>
-                <ul className="mt-1 space-y-0.5 text-[10px] leading-snug text-stone-400 sm:text-[11px]">
-                  <li>• iPhone/iPad: «Поделиться» → «На экран „Домой“»</li>
-                  <li>• Android: меню браузера → «Установить приложение»</li>
-                  <li>• Windows: значок ⤓ в адресной строке Edge/Chrome</li>
-                </ul>
-              </div>
-
-              <div className="mt-2 text-center text-[10px] text-stone-600">
-                FOODSTORATOR v0.2 · {LEVEL_NAME} · {LEVEL_COUNT} волн
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ---------- ПРАВИЛА ---------- */}
-        {showHowTo && (
-          <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/75 p-2" onClick={() => setShowHowTo(false)}>
-            <div
-              className="max-h-full w-full max-w-lg overflow-y-auto rounded-2xl bg-stone-900 p-3 shadow-2xl sm:p-5"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="mb-2 text-center text-xl font-black text-white sm:text-2xl">📖 Правила кухни</div>
-
-              {/* Цель */}
-              <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs leading-snug text-amber-100 sm:text-sm">
-                <b className="text-amber-300">Цель:</b> подавай блюда, пока они едут по конвейеру. Репутация на нуле — ресторан закрыт. Продержись все {LEVEL_COUNT} волн и прими «БАНКЕТ»!
-              </div>
-
-              {/* Схема потока */}
-              <div className="mt-2 flex flex-wrap items-center justify-center gap-1 rounded-xl bg-stone-800/70 p-2 text-[11px] font-semibold text-white sm:text-sm">
-                <span className="rounded-lg bg-stone-900 px-2 py-1">📦 Склад</span>
-                <span className="text-stone-500">→</span>
-                <span className="rounded-lg bg-stone-900 px-2 py-1">🔪 готовка на станциях</span>
-                <span className="text-stone-500">→</span>
-                <span className="rounded-lg bg-stone-900 px-2 py-1">🧑‍🍳 Стойка</span>
-              </div>
-
-              {/* Станции */}
-              <div className="mt-3">
-                <div className="mb-1 text-[11px] font-bold uppercase tracking-wide text-stone-400 sm:text-xs">Станции-башни</div>
-                <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
-                  {STATION_ORDER.map((t) => {
-                    const d = STATIONS[t]
-                    return (
-                      <div key={t} className="flex items-center gap-2 rounded-lg bg-stone-800/70 px-2 py-1.5">
-                        <span className="text-lg">{d.emoji}</span>
-                        <div className="min-w-0">
-                          <div className="truncate text-xs font-bold text-white">
-                            {d.name} · <span className="text-amber-300">{d.cost}₽</span>
-                          </div>
-                          <div className="truncate text-[10px] leading-tight text-stone-400">{d.desc}</div>
-                        </div>
+        {/* Магазин (справа на десктопе, снизу на мобиле) */}
+        {inGame && (
+          <aside className="w-full lg:w-[236px] shrink-0 flex lg:flex-col flex-row gap-2 overflow-x-auto lg:overflow-visible pb-1 lg:pb-0">
+            {/* Карточки башен */}
+            <div className="lg:contents contents">
+              <div className="flex lg:flex-col flex-row gap-2">
+                {TOWER_ORDER.map((id, i) => {
+                  const def = TOWERS[id]
+                  const afford = hud.money >= def.cost
+                  const active = hud.placing === id
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      title={`${def.name} — ${def.desc}`}
+                      disabled={!afford}
+                      onClick={() => {
+                        if (active) engine.cancelPlacing()
+                        else engine.beginPlacing(id)
+                      }}
+                      className={`shrink-0 w-[150px] lg:w-full flex items-center gap-2 rounded-xl border px-2 py-1.5 text-left transition-colors ${
+                        active
+                          ? 'border-green-400 bg-green-900/40'
+                          : afford
+                            ? 'border-stone-700 bg-stone-900/80 hover:border-stone-500'
+                            : 'border-stone-800 bg-stone-900/50 opacity-45 cursor-not-allowed'
+                      }`}
+                    >
+                      <span className="text-[10px] font-mono text-stone-500 w-3">{i + 1}</span>
+                      <TowerIcon id={id} size={38} />
+                      <div className="min-w-0">
+                        <div className="text-[12px] font-bold text-stone-100 leading-tight truncate">{def.name}</div>
+                        <div className="text-[11px] text-amber-400 font-bold">₽ {def.cost}</div>
                       </div>
-                    )
-                  })}
-                </div>
+                    </button>
+                  )
+                })}
               </div>
 
-              {/* Рецепты */}
-              <div className="mt-3">
-                <div className="mb-1 text-[11px] font-bold uppercase tracking-wide text-stone-400 sm:text-xs">Рецепты: шаги цепочкой</div>
-                <div className="rounded-xl bg-stone-800/70 p-2">
-                  {Object.values(RECIPES).map((r) => (
-                    <div key={r.id} className="flex items-center justify-between gap-2 py-0.5 text-[11px] sm:text-xs">
-                      <span className="shrink-0 font-bold text-white">{r.emoji} {r.name}</span>
-                      <span className="truncate text-stone-300">{stepsStr(r)} <span className="font-bold text-amber-300">· {r.price}₽</span></span>
+              {/* Состав волны */}
+              <div className="shrink-0 lg:shrink rounded-xl border border-stone-700 bg-stone-900/80 px-2.5 py-2 min-w-[150px] lg:w-full">
+                <div className="text-[11px] uppercase tracking-wide text-stone-500 font-bold mb-1">
+                  {hud.phase === 'wave' ? 'Сейчас в волне' : 'Следующая волна'}
+                </div>
+                <div className="flex lg:flex-col flex-wrap gap-1">
+                  {[...waveComp.entries()].map(([id, count]) => (
+                    <div key={id} className="flex items-center gap-1.5">
+                      <EnemyIcon id={id} size={26} />
+                      <span className="text-[12px] text-stone-300">
+                        {ENEMIES[id].name} <b className="text-stone-100">×{count}</b>
+                      </span>
                     </div>
                   ))}
                 </div>
               </div>
 
-              {/* Важно знать */}
-              <div className="mt-3 grid grid-cols-2 gap-1.5 text-[10px] leading-snug sm:grid-cols-3 sm:text-[11px]">
-                <div className="rounded-lg bg-green-500/15 p-2 text-green-200"><b className="text-green-400">✅ Идеал:</b> все шаги → чаевые ×1.25 и +2⭐</div>
-                <div className="rounded-lg bg-orange-500/15 p-2 text-orange-200"><b className="text-orange-400">❌ Провал:</b> шаги пропущены → −12⭐</div>
-                <div className="rounded-lg bg-red-500/15 p-2 text-red-200"><b className="text-red-400">🔥 Перегрев:</b> 3 лишних жарки — блюдо сгорело, −20⭐</div>
-                <div className="rounded-lg bg-sky-500/15 p-2 text-sky-200"><b className="text-sky-400">❄️ Морозилка:</b> тормозит конвейер — у поваров больше времени</div>
-                <div className="rounded-lg bg-violet-500/15 p-2 text-violet-200"><b className="text-violet-400">🃏 Draft:</b> после волны выбор 1 из 3 карт; пропуск +{WAVE_SKIP_BONUS}₽</div>
-                <div className="rounded-lg bg-stone-700/60 p-2 text-stone-200"><b className="text-white">👀 Разведка:</b> перед волной виден состав блюд — строй станции под них</div>
-              </div>
-
-              {/* Управление */}
-              <div className="mt-3 rounded-xl bg-stone-800/70 p-2.5 text-[11px] leading-snug text-stone-300 sm:text-xs">
-                <b className="text-white">Управление:</b> кнопка станции внизу → свободная клетка у конвейера. Тап по построенной — улучшить или продать. Клавиши: 1–5 станции, Space — пауза, Esc — отмена.
-              </div>
-
-              <div className="mt-3 flex justify-center">
-                <button
-                  onClick={() => setShowHowTo(false)}
-                  className="rounded-xl bg-amber-500 px-6 py-2.5 font-bold text-white shadow-lg transition hover:bg-amber-400"
-                >
-                  Понятно!
-                </button>
-              </div>
+              {/* Выбранная башня */}
+              {hud.selected && (
+                <div className="shrink-0 lg:shrink rounded-xl border border-amber-500/50 bg-stone-900/90 px-2.5 py-2 lg:w-full">
+                  <div className="text-[13px] font-bold text-amber-300">
+                    {TOWERS[hud.selected.type].name} <span className="text-stone-400">ур. {hud.selected.level}</span>
+                  </div>
+                  <div className="text-[11px] text-stone-400 mt-0.5 grid grid-cols-2 gap-x-2">
+                    <span>урон: <b className="text-stone-200">{hud.selected.dmg}</b></span>
+                    <span>
+                      {TOWERS[hud.selected.type].kind === 'flame' ? 'струя' : 'темп'}:{' '}
+                      <b className="text-stone-200">{TOWERS[hud.selected.type].kind === 'flame' ? '—' : hud.selected.rate.toFixed(2)}</b>
+                    </span>
+                    <span>радиус: <b className="text-stone-200">{hud.selected.range}</b></span>
+                    <span>DPS: <b className="text-green-300">{hud.selected.dps}</b></span>
+                  </div>
+                  <div className="flex gap-1.5 mt-1.5">
+                    <Btn
+                      tone="amber"
+                      disabled={hud.selected.maxed || hud.money < hud.selected.upCost}
+                      onClick={() => engine.upgradeSelected()}
+                      className="flex-1 text-[12px] px-1.5"
+                    >
+                      {hud.selected.maxed ? 'Макс.' : `↑ ${hud.selected.upCost}₽`}
+                    </Btn>
+                    <Btn tone="red" onClick={() => engine.sellSelected()} className="text-[12px] px-1.5">
+                      ✕ {hud.selected.sell}₽
+                    </Btn>
+                  </div>
+                </div>
+              )}
             </div>
-          </div>
+          </aside>
         )}
       </div>
 
-      {/* ---------- ПОВОРОТ ЭКРАНА ---------- */}
-      <div className="rotate-hint fixed inset-0 z-50 flex-col items-center justify-center gap-3 bg-stone-950 p-6 text-center">
-        <div className="text-6xl">🔄</div>
-        <div className="text-lg font-bold text-white">Поверни телефон горизонтально</div>
-        <div className="text-sm text-stone-400">Игра рассчитана на альбомный режим</div>
-      </div>
-
-      <style jsx global>{`
-        .rotate-hint {
-          display: none;
-        }
-        @media (orientation: portrait) and (max-width: 820px) {
-          .rotate-hint {
-            display: flex;
-          }
-        }
-      `}</style>
+      <footer className="text-[11px] text-stone-600 pb-1">
+        Овощной спецназ против джанк-фуда · {hud.phase === 'menu' ? 'FOODSTORATOR TD v2.0' : 'защищай рот от вредной еды'}
+      </footer>
     </div>
   )
 }
